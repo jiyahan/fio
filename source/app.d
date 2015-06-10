@@ -1,11 +1,19 @@
 import std.stdio;
 import std.datetime;
+import std.experimental.logger;
 
-import fio: runEventLoop, fioSleep;
+import fio: runEventLoop, stopEventLoop, fioTask, fioSleep;
 
 void main()
 {
-	fioSleep(1.seconds);
-	writeln("running loop");
-	runEventLoop();
+    globalLogLevel(LogLevel.info);
+    auto task = new fioTask({
+        info("sleep for 5 seconds");
+        fioSleep(5.seconds);
+        info("wakeup");
+        stopEventLoop();
+    });
+    info("running loop");
+    runEventLoop();
+    info("done");
 }

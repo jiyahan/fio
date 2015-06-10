@@ -27,9 +27,9 @@ private EventLoop 	evl;
 private bool      	stopped = false;
 private fioFiber  	loop;
 
-private Fiber[]					runnables;
-private static bool[fioTask]	started;
-private static bool[fioTask]	zombie;
+private Fiber[]                 runnables;
+private static bool[fioTask]    started;
+private static bool[fioTask]    zombie;
 
 enum {
     ERROR = -1,
@@ -642,23 +642,6 @@ unittest {
         stopEventLoop();
     }
     new fioTask(&testAll);
-    //void testf2() {
-    //	foreach(i; 0 .. 100_000) {
-    //		trace("connect ", i);
-    //		auto conn = new fioConnection("1.1.1.1", 9999, 50.msecs);
-    //		if ( !conn || !conn.connected ) {
-    //			trace("Can't connect");
-    //		} else{
-    //		}
-    //		conn.close();
-    //		destroy(conn);
-    //		trace("---");
-    //		//GC.collect();
-    //		//GC.minimize();
-    //	}
-    //	stopEventLoop();
-    //}
-    //new fioTask(&testf2);
     runEventLoop();
     writeln("Test finished");
 }
