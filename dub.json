@@ -1,0 +1,13 @@
+{
+    "name": "fio",
+    "description": "A minimal D application.",
+    "copyright": "Copyright © 2015, igor",
+    "authors": ["igor"],
+    "dependencies": {
+    },
+    "buildTypes": {
+        "unittests": {
+            "buildOptions": ["debugMode", "debugInfo"]
+        }
+    }
+}
