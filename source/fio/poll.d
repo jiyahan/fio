@@ -57,11 +57,11 @@ union epoll_data_t
         EventHandler handler;
 };
 
-extern(C) int epoll_create(int size) @safe nothrow;
-extern(C) int epoll_ctl(int epfd, int op, int fd, epoll_event *event) @safe nothrow;
-extern(C) int epoll_wait(int epfd, epoll_event *events, int maxevents, int timeout);
-extern(C) int timerfd_create(int clockid, int flags) @safe nothrow;
-extern(C) int timerfd_settime(int fd, int flags, itimerspec* new_value, itimerspec* old_value) @safe nothrow;
+extern(C) int epoll_create(int size) @safe @nogc nothrow;
+extern(C) int epoll_ctl(int epfd, int op, int fd, epoll_event *event) @safe @nogc nothrow;
+extern(C) int epoll_wait(int epfd, epoll_event *events, int maxevents, int timeout) @safe @nogc nothrow;
+extern(C) int timerfd_create(int clockid, int flags) @safe @nogc nothrow;
+extern(C) int timerfd_settime(int fd, int flags, itimerspec* new_value, itimerspec* old_value) @safe @nogc nothrow;
 
 enum MAXEVENTS = 1024;
 
@@ -73,17 +73,19 @@ class EventLoop {
     int epoll_fd;
     align(1) epoll_event[MAXEVENTS] events;
 
-    this() {
+    this() nothrow @trusted {
         epoll_fd = epoll_create(MAXEVENTS);
         if ( epoll_fd < 0 ) {
-            error("Failed to create epoll_fd");
+            try {
+                error("Failed to create epoll_fd");
+            } catch(Exception e) {}
             return;
         }
     }
-    int add(int fd, epoll_event e) {
+    int add(int fd, epoll_event e) nothrow @trusted @nogc {
         return epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &e);
     }
-    int del(int fd, epoll_event e) {
+    int del(int fd, epoll_event e) nothrow @trusted @nogc {
         return epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &e);
     }
     void loop(Duration d) {
@@ -106,8 +108,6 @@ class EventLoop {
         }
 
     }
-    void loop() {
-    }
 }
 
 class AsyncTimer : EventHandler {
@@ -129,22 +129,22 @@ class AsyncTimer : EventHandler {
         }
     }
 
-   ~this() @safe nothrow {
+   ~this() @safe @nogc nothrow {
         if ( timer_fd > 0 ) {
             close(timer_fd);
             timer_fd = -1;
         }
    }
 
-    Duration duration() const @property @safe nothrow {
+    Duration duration() const @property @safe @nogc nothrow pure {
         return d;
     }
 
-    void duration(Duration d) @property @safe nothrow {
+    void duration(Duration d) @property @safe @nogc nothrow pure {
         this.d = d;
     }
 
-    void run(void delegate() dg)
+    void run(void delegate() dg) @trusted
     in {
         assert(d != d.init, "AsyncTimer can't run without duration");
         assert(timer_fd != -1, "AsyncTimer can't run without timer_fd");
@@ -177,16 +177,17 @@ class AsyncTimer : EventHandler {
             timer_fd = -1;
         }
     }
-    override string toString() const nothrow pure {
+    override string toString() @safe @nogc const nothrow pure {
         return caller;
     }
 }
 
 class asyncAccept : EventHandler {
-    Socket 					so;
-    EventLoop				evl;
-    void delegate(Event)	_on_accept;
-    this(EventLoop evl, Socket so, void delegate(Event) d) {
+    Socket                  so;
+    EventLoop               evl;
+    void delegate(Event)    _on_accept;
+
+    this(EventLoop evl, Socket so, void delegate(Event) d) @trusted {
         this.so = so;
         this.evl = evl;
         this._on_accept = d;
@@ -198,7 +199,7 @@ class asyncAccept : EventHandler {
         evl.add(so.handle, e);
     }
 
-    void close() {
+    void close() nothrow @safe @nogc {
         auto e = epoll_event();
         e.events =  EPOLLIN ;
         e.data.handler = this;
@@ -229,14 +230,14 @@ class asyncConnection : EventHandler {
     void delegate(Event)    _on_recv;
     void delegate(Event)    _on_err;
 
-    this(EventLoop evl, Socket so) {
+    this(EventLoop evl, Socket so) @safe @nogc nothrow pure {
         // create from connected socket
         this.so = so;
         this.evl = evl;
         this._connected = true;
     }
 
-    this(EventLoop evl, Socket so, Address to, void delegate(Event) dg) {
+    this(EventLoop evl, Socket so, Address to, void delegate(Event) dg) @safe {
         this._on_conn = dg;
         this.so = so;
         this.evl = evl;
@@ -248,19 +249,19 @@ class asyncConnection : EventHandler {
         evl.add(so.handle, e);
     }
 
-    bool connected() pure const nothrow @safe @property {
+    bool connected() pure const nothrow @safe @property @nogc {
         return _connected;
     }
-    bool error() pure const nothrow @safe @property {
+    bool error() pure const nothrow @safe @property @nogc {
         return _error;
     }
-    bool instream_closed() pure const nothrow @safe @property {
+    bool instream_closed() pure const nothrow @safe @property @nogc {
         return _instream_closed;
     }
-    bool outstream_closed() pure const nothrow @safe @property {
+    bool outstream_closed() pure const nothrow @safe @property @nogc {
         return _outstream_closed;
     }
-    void on_send(void delegate(Event) d) @property
+    void on_send(void delegate(Event) d) @property @safe @nogc
     in {
         assert(!_error || !d, "send to error-ed connection");
         assert(_connected, "send to disconnected" );
@@ -269,13 +270,11 @@ class asyncConnection : EventHandler {
     body {
         if ( d is null ) {
             // stop sending
-            trace("stop sending");
             _on_send = null;
             epoll_event e;
             e.events = EPOLLOUT;
             evl.del(so.handle, e);
         } else {
-            trace("start sending");
             _on_send = d;
             epoll_event e;
             e.events = EPOLLOUT;
@@ -284,7 +283,7 @@ class asyncConnection : EventHandler {
         }
     }
 
-    void on_recv(void delegate(Event) d) @property
+    void on_recv(void delegate(Event) d) @property @safe
     in {
         assert(_instream_closed || !_error || d is null, "recv error-ed connection");
         assert(_connected, "recv disconnected" );
@@ -300,8 +299,6 @@ class asyncConnection : EventHandler {
             evl.del(so.handle, e);
         } else {
             trace("start receiving");
-//			writeln(_error, " ", _on_recv);
-//			assert(!_error && _on_recv, "recv error-ed connection");
             _on_recv = d;
             epoll_event e;
             e.events = EPOLLIN|EPOLLHUP;

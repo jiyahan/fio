@@ -66,6 +66,7 @@ class fioTCPListener {
         server = d;
         _address = getAddress(host, port)[0];
         so = new Socket(_address.addressFamily, SocketType.STREAM, ProtocolType.TCP);
+        so.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, 1);
         so.bind(_address);
         so.listen(BACKLOG);
         acceptor = new asyncAccept(evl, so, &run);
@@ -76,7 +77,7 @@ class fioTCPListener {
         trace("handle new incoming connection");
         auto newSo = so.accept();
         auto fio_connection = new fioTCPConnection(newSo);
-        auto server_task = new fioTask((){
+        auto server_task = new fioDaemonTask((){
             trace("calling incoming server");
             scope(exit) {
                 fio_connection.close();
@@ -342,43 +343,54 @@ class fioTCPConnection {
     }
 }
 
-class fioTask : Fiber {
-    enum states {
-        init = 0,
-        run  = 1,
-        fin  = 2
+class fioDaemonTask: fioTask {
+    @disable override void wait() {};
+    this(void delegate() f) {
+        super(f, true);
     }
-    int 			state;
+}
+
+class fioTask : Fiber {
     void delegate() f;
     Fiber[]			in_wait;
+    bool            daemon;
 
-    this(void delegate() f) {
+    this(void delegate() f, bool daemon=false) {
         super(&run, 64*1024);
         this.f = f;
-        this.state = states.init;
+        this.daemon = daemon;
         runnables ~= this;
-//		started[this] = true;
     }
+
     void wait() {
-        auto f = Fiber.getThis();
-        if ( this.state == states.run ) {
+        if ( state == Fiber.State.TERM ) {
             return;
         }
+        auto f = Fiber.getThis();
         in_wait ~= f;
         Fiber.yield();
     }
+
 private:
     void run() {
-        this.state = states.run;
+        started[this] = true;
         f();
-        this.state = states.fin;
-        trace("fioTask Finished");
+        if ( daemon ) {
+            trace("fioDaemonTask Finished");
+            zombie[this]=true;
+            assert(started[this] == true);
+            auto removed = started.remove(this);
+            assert(removed);
+            return;
+        }
         if ( in_wait.length ) {
-            foreach(ref f; this.in_wait) {
+            runnables ~= this;
+            foreach(ref f; in_wait) {
                 runnables ~= f;
             }
             Fiber.yield();
         }
+        started.remove(this);
     }
 }
 
@@ -405,7 +417,10 @@ private:
             if ( stopped ) {
                 break;
             }
-
+            foreach(ref z; zombie.byKey) {
+                zombie.remove(z);
+                destroy(z);
+            }
             evl.loop(60.seconds);
             trace("ev loop wakeup");
         }
@@ -443,12 +458,43 @@ unittest {
             info("t finished");
         }
         auto task = new fioTask(&t);
-        info("wait for t");
         auto start = Clock.currTime();
         task.wait();
         auto stop = Clock.currTime();
         assert(990.msecs < stop - start && stop - start < 1010.msecs);
         info("Test wait - ok");
+
+        globalLogLevel(LogLevel.info);
+        info("Test task create/destroy");
+        int loops = 50000;
+        int c = 0;
+        void empty() {
+            c++;
+        }
+        info("Test non-daemon task wait() after some delay");
+        foreach(i; 0..loops) {
+            auto z = new fioTask(&empty);
+            fioSleep(1.msecs);
+            z.wait();
+            destroy(z);
+        }
+        info("Test non-daemon task wait() right after start");
+        foreach(i; 0..loops) {
+            auto z = new fioTask(&empty);
+            z.wait();
+            destroy(z);
+        }
+        info("Test daemon task");
+        foreach(i; 0..loops) {
+            auto z = new fioDaemonTask(&empty);
+            fioSleep(1.msecs);
+        }
+        info("Test task create/destroy - ok");
+        fioSleep(5.seconds);
+        writeln(c, " s:", started.length," z:", zombie.length);
+        globalLogLevel(LogLevel.info);
+
+
         info("Test sleeps");
         void test0() {
             fioSleep(1.seconds);
@@ -466,6 +512,8 @@ unittest {
         task = new fioTask(&test0);
         task.wait();
         info("Test sleeps - ok");
+        writeln(c, " started=", started.length, " zombie=", zombie.length);
+
         void test1() {
             int loops = 5000;
             infof("%s:%d, tmo=%s - wait", "1.1.1.1", 9998, to!string(10.msecs));
@@ -499,7 +547,7 @@ unittest {
                 auto conn = new fioTCPConnection("localhost", 9998, 0.seconds);
                 stop = Clock.currTime();
                 assert( !conn.connected );
-                assert( stop - start < 10.msecs,
+                assert( stop - start < 5.msecs,
                     format("Connection to localhost should return instantly, but it took %s", to!string(stop-start))
                 );
                 conn.close();
@@ -509,18 +557,21 @@ unittest {
             void dumb_server(fioTCPConnection c) {
                 // nothing
             }
-            auto dumb_server_listener = new fioTCPListener("localhost", 9997, &dumb_server);
-            loops = 100;
-            foreach(i;0..loops) {
-                auto c = new fioTCPConnection("localhost", 9997, 10.seconds);
-                assert(c.connected);
-                //info("connected");
-                c.close();
-                if ( i> 0 && (i % 10 == 0) ) {
-                    info(format("%d iterations out of %d", i, loops));
+            foreach(int j; 0..10000) {
+                auto dumb_server_listener = new fioTCPListener("localhost", 9997, &dumb_server);
+                loops = 100;
+                foreach(i;0..loops) {
+                    auto c = new fioTCPConnection("localhost", 9997, 10.seconds);
+                    assert(c.connected);
+                    //info("connected");
+                    c.close();
+                }
+                dumb_server_listener.close();
+                destroy(dumb_server_listener);
+                if ( j > 0 && (j % 1000 == 0) ) {
+                    info(format("%d iterations out of %d", j, 1000));
                 }
             }
-            dumb_server_listener.close();
             info("test dumb listener - done");
             globalLogLevel(LogLevel.info);
             void test_server(fioTCPConnection c) {
