@@ -5,7 +5,9 @@ private import std.datetime;
 private import std.experimental.logger;
 private import std.socket;
 private import std.format;
+private import std.range;
 private import std.conv;
+private import std.typecons;
 private import core.thread;
 private import core.memory;
 private import core.sys.posix.unistd : pipe, write;
@@ -20,14 +22,53 @@ template frm(alias v) {
     }
 }
 
+static Exception RingEmpty;
+static Exception RingFull;
 
-//private import libasync;
+static this() {
+    RingEmpty = new Exception("Ring empty");
+    RingFull = new Exception("Ring full");
+}
 
-private EventLoop 	evl;
-private bool      	stopped = false;
-private fioFiber  	loop;
+struct Ring {
+    ///
+    /// cyclic buffer for runnable fibers
+    ///
+    int _front;
+    int _back;
+    Fiber[1024] holder;
 
-private Fiber[]                 runnables;
+    int length() pure const nothrow @nogc @property {
+        return (_back-_front)%holder.length;
+    }
+    ulong capacity() pure const nothrow @nogc @property {
+        return holder.length - this.length;
+    }
+    void opOpAssign(string s: "~", T)(T x) @nogc {
+        if (this.length >= holder.length ) {
+            throw RingFull;
+        }
+        holder[_back] = x;
+        _back = (_back+1) % holder.length;
+    }
+    bool empty() @property @nogc pure const nothrow {
+        return this.length == 0;
+    }
+    Fiber front() @property @nogc {
+        if ( empty ) throw RingEmpty;
+        return holder[_front];
+    }
+    void popFront() @nogc {
+        if ( empty ) throw RingEmpty;
+        _front =( _front+1)%holder.length;
+    }
+}
+
+private static EventLoop 	evl;
+private static bool      	stopped = false;
+private static fioFiber  	loop;
+
+private static Ring          runnables;
 private static bool[fioTask]    started;
 private static bool[fioTask]    zombie;
 
@@ -44,14 +85,13 @@ static this() {
 }
 
 void fioSleep(in Duration d) {
-    auto t = new AsyncTimer(evl, __FILE__, __LINE__);
+    auto t = scoped!AsyncTimer(evl);
     auto f = Fiber.getThis();
     t.duration = d;
     t.run({
-        t.kill();		// release timer file descriptor and other resources
         runnables ~= f; // continue task
     });
-    Fiber.yield(); // pass control to main
+    Fiber.yield();  // pass control to main
 }
 
 class fioTCPListener {
@@ -75,17 +115,16 @@ class fioTCPListener {
 
     void run(Event e) {
         trace("handle new incoming connection");
-        auto newSo = so.accept();
-        auto fio_connection = new fioTCPConnection(newSo);
-        auto server_task = new fioDaemonTask((){
-            trace("calling incoming server");
+        void run() {
+            auto newSo = so.accept();
+            auto fio_connection = scoped!fioTCPConnection(newSo);
             scope(exit) {
                 fio_connection.close();
-                fio_connection = null;
-                newSo = null; // socket closed in fioConnection.close
+                destroy(newSo);
             }
             server(fio_connection);
-        });
+        }
+        auto server_task = new fioDaemonTask(&run);
     }
 
     void  close() {
@@ -95,8 +134,9 @@ class fioTCPListener {
         }
         if ( so !is null ) {
             so.close();
+            destroy(so);
+            so = null;
         }
-        so = null;
     }
 }
 
@@ -104,10 +144,9 @@ class fioTCPConnection {
     string          host;
     ushort          port;
     Socket          so;
-    AsyncTimer      timer;
     Fiber           thisFiber;
     bool            _timedout;
-    Address         _address;
+    Address[]       _address;
     asyncConnection _async_connection;
 
     this(Socket so) {
@@ -120,28 +159,35 @@ class fioTCPConnection {
         this.host = host;
         this.port = port;
         _timedout = false;
-        _address = getAddress(host, port)[0];
+        _address = getAddress(host, port);
+        auto t = scoped!AsyncTimer(evl);
         thisFiber = Fiber.getThis();
 
-        so = new Socket(_address.addressFamily, SocketType.STREAM, ProtocolType.TCP);
+        so = new Socket(_address[0].addressFamily, SocketType.STREAM, ProtocolType.TCP);
         if ( timeout != 0.seconds ) {
-            timer = new AsyncTimer(evl,__FILE__,__LINE__);
-            timer.duration = timeout;
-            timer.run({
-                timer.kill();
-                timer = null;
+            t.duration = timeout;
+            t.run({
                 _timedout = true;
                 runnables ~= thisFiber;
             });
         }
-        _async_connection = new asyncConnection(evl, so, _address, (Event e){
-            if ( timer ) {
-                timer.kill();
-                timer = null;
-            }
+        _async_connection = new asyncConnection(evl, so, _address[0], (Event e){
             runnables ~= thisFiber;
         });
         Fiber.yield();
+    }
+
+    void close() {
+        if ( so ) {
+            //so.close(); // destroy will close
+            destroy(so);
+            so = null;
+        }
+        if ( _async_connection ) {
+            destroy(_async_connection);
+            _async_connection = null;
+        }
+        destroy(_address);
     }
 
     bool connected() const pure nothrow @property {
@@ -160,13 +206,14 @@ class fioTCPConnection {
         return !_async_connection || _async_connection.outstream_closed();
     }
 
-    int send(const void[] buff, Duration timeout = 60.seconds)
+    int send(const void[] buff, in Duration timeout = 60.seconds)
     in {
         assert( buff.length, "You can't send from empty buffer");
     }
     body {
         uint _sent = 0;
         _timedout = false;
+        auto timer = scoped!AsyncTimer(evl);
         thisFiber = Fiber.getThis();
 
         if ( _async_connection is null ) {
@@ -175,23 +222,17 @@ class fioTCPConnection {
         }
 
         if ( _async_connection.error ) {
-            trace("trying to send to error-ed socket");
+            std.experimental.logger.error("trying to send to error-ed socket");
             return ERROR;
         }
 
         scope(exit) {
             _async_connection.on_send = null;
-            if ( timer ) {
-                timer.kill();
-            }
         }
 
         if ( timeout != 0.seconds ) {
-            timer = new AsyncTimer(evl, __FILE__, __LINE__);
             timer.duration = timeout;
             timer.run({
-                timer.kill();
-                timer = null;
                 _timedout = true;
                 runnables ~= thisFiber;
             });
@@ -213,11 +254,6 @@ class fioTCPConnection {
                 }
                 _sent += rc;
             }
-            if ( timer ) {
-                this.timer.kill();
-                destroy(this.timer);
-                this.timer = null;
-            }
             _async_connection.on_send = null;
             runnables ~= thisFiber;
         }
@@ -234,7 +270,7 @@ class fioTCPConnection {
         return _sent;
     }
 
-    int recv(byte[] buff, Duration timeout=0.seconds, bool partial=true)
+    int recv(byte[] buff, in Duration timeout=0.seconds, bool partial=true)
     /***********************************************
     * Receive data from socket
     * when data received from low level:
@@ -252,6 +288,7 @@ class fioTCPConnection {
         int	received = 0;
         _timedout = false;
         thisFiber = Fiber.getThis();
+        auto timer = scoped!AsyncTimer(evl);
 
 
         if ( _async_connection is null ) {
@@ -265,18 +302,11 @@ class fioTCPConnection {
 
         scope(exit) {
             _async_connection.on_recv = null;
-            if ( timer ) {
-                timer.kill();
-            }
         }
 
         if ( timeout != 0.seconds ) {
-            timer = new AsyncTimer(evl, __FILE__, __LINE__);
             timer.duration = timeout;
             timer.run({
-                timer.kill();
-                timer = null;
-
                 _timedout = true;
                 runnables ~= thisFiber;
             });
@@ -325,22 +355,6 @@ class fioTCPConnection {
         }
         return 0;
     }
-    void close() {
-        if (timer) {
-            timer.kill();
-            destroy(timer);
-            timer = null;
-        }
-        if ( so ) {
-            so.close();
-            destroy(so);
-            so = null;
-        }
-        if ( _async_connection ) {
-            destroy(_async_connection);
-            _async_connection = null;
-        }
-    }
 }
 
 class fioDaemonTask: fioTask {
@@ -376,7 +390,6 @@ private:
         started[this] = true;
         f();
         if ( daemon ) {
-            trace("fioDaemonTask Finished");
             zombie[this]=true;
             assert(started[this] == true);
             auto removed = started.remove(this);
@@ -403,17 +416,15 @@ private:
     void run() {
         // This is fiber's main coordination loop
         while ( !stopped ) {
-            do {
-                foreach(ref f; runnables) {
-                    try {
-                        f.call(Rethrow.yes);
-                    } catch (Exception e) {
-                        error("fio catched Exception: " ~ e.toString);
-                    }
-                    runnables = runnables[1..$];
+            while ( runnables.length ) {
+                auto f = runnables.front();
+                runnables.popFront();
+                try {
+                    f.call(Rethrow.yes);
+                } catch (Exception e) {
+                    error("fio catched Exception: " ~ e.toString);
                 }
-            } while (runnables.length); // run again if runnable expanded from inside fiber
-
+            }
             if ( stopped ) {
                 break;
             }
@@ -424,7 +435,6 @@ private:
             evl.loop(60.seconds);
             trace("ev loop wakeup");
         }
-        //destroyAsyncThreads();
     }
 }
 
@@ -438,18 +448,6 @@ void stopEventLoop() {
 unittest {
     globalLogLevel(LogLevel.info);
     auto l_evl = new EventLoop();
-    //auto clock = new Clock();
-    //info("Phase 1");
-    //auto t = new AsyncTimer(l_evl);
-    //t.duration = 1.seconds;
-    //SysTime start = Clock.currTime(), stop;
-    //t.run({
-    //	stop = Clock.currTime();
-    //});
-    //l_evl.loop(5.seconds);
-    //assert(990.msecs < stop - start && stop - start < 1010.msecs);
-    //info("Phase 1 - ok");
-    //info("Phase 2");
     void testAll() {
         info("Test wait");
         void t() {
@@ -523,6 +521,7 @@ unittest {
                 stop = Clock.currTime();
                 assert( !conn.connected );
                 conn.close();
+                destroy(conn);
                 assert(5.msecs < stop - start && stop - start < 20.msecs, format("connect took %s", to!string(stop-start)));
                 if ( i> 0 && (i % 1000 == 0) ) {
                     info(format("%d iterations out of %d", i, loops));
@@ -538,6 +537,7 @@ unittest {
                 assert( !conn.connected );
                 assert( stop - start < 5.msecs, "Connection to localhost should return instantly" );
                 conn.close();
+                destroy(conn);
             }
             infof("%s:%d, tmo=%s passed", "localhost", 9998, to!string(10.msecs));
             infof("%s:%d, tmo=%s - wait", "localhost", 9998, to!string(0.seconds));
@@ -551,6 +551,7 @@ unittest {
                     format("Connection to localhost should return instantly, but it took %s", to!string(stop-start))
                 );
                 conn.close();
+                destroy(conn);
             }
             infof("%s:%d, tmo=%s passed", "localhost", 9998, to!string(0.seconds));
             info("test dumb listener");
@@ -558,16 +559,14 @@ unittest {
                 // nothing
             }
             foreach(int j; 0..10000) {
-                auto dumb_server_listener = new fioTCPListener("localhost", 9997, &dumb_server);
+                auto dumb_server_listener = scoped!fioTCPListener("localhost", cast(ushort)9997, &dumb_server);
                 loops = 100;
                 foreach(i;0..loops) {
-                    auto c = new fioTCPConnection("localhost", 9997, 10.seconds);
+                    auto c = scoped!fioTCPConnection("localhost", cast(ushort)9997, 10.seconds);
                     assert(c.connected);
-                    //info("connected");
                     c.close();
                 }
                 dumb_server_listener.close();
-                destroy(dumb_server_listener);
                 if ( j > 0 && (j % 1000 == 0) ) {
                     info(format("%d iterations out of %d", j, 1000));
                 }
@@ -682,6 +681,7 @@ unittest {
                 assert(conn.instream_closed);
                 assert(conn.outstream_closed);
                 assert(conn.error);
+                destroy(conn);
             }
             infof("%s:%d, tmo=%s passed", host, port, to!string(t));
             globalLogLevel(LogLevel.info);

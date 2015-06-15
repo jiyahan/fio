@@ -73,13 +73,10 @@ class EventLoop {
     int epoll_fd;
     align(1) epoll_event[MAXEVENTS] events;
 
-    this() nothrow @trusted {
+    this() nothrow @safe @nogc {
         epoll_fd = epoll_create(MAXEVENTS);
         if ( epoll_fd < 0 ) {
-            try {
-                error("Failed to create epoll_fd");
-            } catch(Exception e) {}
-            return;
+            assert(false, "Failed to create epoll_fd");
         }
     }
     int add(int fd, epoll_event e) nothrow @trusted @nogc {
@@ -89,7 +86,6 @@ class EventLoop {
         return epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &e);
     }
     void loop(Duration d) {
-        trace("enter loop with duration ", to!string(d));
         if ( d == 0.seconds ) {
             return;
         }
@@ -97,43 +93,45 @@ class EventLoop {
         uint timeout_ms = cast(int)d.total!"msecs";
 
         uint ready = epoll_wait(epoll_fd, cast(epoll_event*)&events[0], MAXEVENTS, timeout_ms);
-        trace("epoll_wait returned ", to!string(ready));
+//        trace("epoll_wait returned ", to!string(ready));
         if ( ready > 0 ) {
             foreach(i; 0..ready) {
                 auto e = events[i];
                 EventHandler handler = e.data.handler;
-                tracef("running handle %s", to!string(handler));
                 handler.handle(e);
             }
         }
-
     }
 }
 
 class AsyncTimer : EventHandler {
-    Duration 	d;
-    int 	 	timer_fd;
-    EventLoop	evl;
+    Duration    d;
+    int         timer_fd;
+    EventLoop   evl;
     void delegate() dg;
-    string caller;
+//    string      caller;
 
-    this(EventLoop evl, string file, size_t line) @safe {
-        caller = format("%s:%d", file, line);
+    this(EventLoop evl, in string file = __FILE__ , in size_t line = __LINE__) @safe @nogc {
+//        caller = format("%s:%d", file, line);
 
         this.timer_fd = timerfd_create(CLOCK_REALTIME, 0);
         this.evl = evl;
 
         if ( timer_fd < 0 ) {
-            error("Failed to create timer_fd");
+//            error("Failed to create timer_fd");
             return;
         }
     }
 
    ~this() @safe @nogc nothrow {
-        if ( timer_fd > 0 ) {
-            close(timer_fd);
-            timer_fd = -1;
-        }
+       kill();
+//        if ( timer_fd != -1 ) {
+//            close(timer_fd);
+//            timer_fd = -1;
+//        }
+//        if ( caller !is null ) {
+//            destroy(caller);
+//        }
    }
 
     Duration duration() const @property @safe @nogc nothrow pure {
@@ -144,14 +142,13 @@ class AsyncTimer : EventHandler {
         this.d = d;
     }
 
-    void run(void delegate() dg) @trusted
+    void run(void delegate() dg) @trusted @nogc
     in {
         assert(d != d.init, "AsyncTimer can't run without duration");
         assert(timer_fd != -1, "AsyncTimer can't run without timer_fd");
     }
     body {
         this.dg = dg;
-        trace("AsyncTimer run");
         itimerspec itimer;
 
         itimer.it_value.tv_sec = cast(typeof(itimer.it_value.tv_sec)) d.split!("seconds", "nsecs")().seconds;
@@ -164,21 +161,21 @@ class AsyncTimer : EventHandler {
     }
 
     override void handle(epoll_event e) {
-        trace("Async timer event");
         dg();
     }
 
-    void kill() @safe nothrow {
-        try
-            trace("AsyncTimer kill");
-        catch (Exception e) {}
+    void kill() @safe @nogc nothrow {
         if ( timer_fd > 0 ) {
+            auto e = epoll_event();
+            e.events = EPOLLET | EPOLLIN;
+            e.data.handler = this;
+            evl.del(timer_fd, e);
             close(timer_fd);
             timer_fd = -1;
         }
     }
     override string toString() @safe @nogc const nothrow pure {
-        return caller;
+        return "";
     }
 }
 
