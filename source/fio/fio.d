@@ -5,9 +5,12 @@ private import std.datetime;
 private import std.experimental.logger;
 private import std.socket;
 private import std.format;
-private import std.range;
+private import std.array;
+//private import std.range;
 private import std.conv;
+private import std.traits;
 private import std.typecons;
+private import std.algorithm: remove, countUntil, map, each;
 private import core.thread;
 private import core.memory;
 private import core.sys.posix.unistd : pipe, write;
@@ -24,10 +27,12 @@ template frm(alias v) {
 
 static Exception RingEmpty;
 static Exception RingFull;
+static Exception ResultNotReady;
 
 static this() {
     RingEmpty = new Exception("Ring empty");
     RingFull = new Exception("Ring full");
+    ResultNotReady = new Exception("Task not ready");
 }
 
 struct Ring {
@@ -65,7 +70,6 @@ struct Ring {
 }
 
 private static EventLoop 	evl;
-private static bool      	stopped = false;
 private static fioFiber  	loop;
 
 private static Ring          runnables;
@@ -84,6 +88,106 @@ static this() {
     loop = new fioFiber;
 }
 
+interface Wait {
+    int wait(Duration);
+}
+
+int[] waitAll(W)(W tasks, Duration d = 0.seconds) {
+    int[]   result;
+    Duration timeleft = d;
+    foreach(t; tasks) {
+        auto r = t.wait(timeleft);
+        result ~= r;
+    }
+    return result;
+}
+unittest {
+    globalLogLevel(LogLevel.info);
+    info("Test Future!");
+    new fioTask((){
+        Wait[] jobs;
+        int base = 1;
+        int f2(int a) {
+            trace("f2 enter");
+            fioSleep(dur!"seconds"(a));
+            trace("f2 leave after %d sleep", a);
+            return a+base;
+        }
+        auto tasks = map!(a => new Future!f2(a))([1, 2, 3]).array();
+        fioSleep(1.seconds);
+        assert(tasks.map!(a => a.waitAndGet).array() == [2,3,4]);
+        info("tasks waitAndGet - ok");
+        tasks = map!(a => new Future!f2(a))([1, 2, 3]).array();
+        waitAll(tasks);
+        info("tasks waitAll - ok");
+        stopEventLoop();
+    });
+    runEventLoop();
+    info("Test Future! Done");
+}
+
+
+class Future(alias f) {
+    fioTask _task;
+
+    static if ( is (ReturnType!f==void) ) {
+        this(ParameterTypeTuple!f a) {
+            void run() {
+                f(a);
+            }
+            _task = new fioTask(&run);
+        }
+        auto get() @property @safe {
+            if ( ready ) {
+                return null;
+            }
+            throw ResultNotReady;
+        }
+    } else {
+        ReturnType!f _result;
+        this(ParameterTypeTuple!f a) {
+            void run() {
+                _result = f(a);
+            }
+            _task = new fioTask(&run);
+        }
+        ReturnType!f get() @property @safe {
+            if ( ready ) {
+                return _result;
+            }
+            throw ResultNotReady;
+        }
+    }
+
+    bool ready() @property @safe {
+        return _task !is null && _task.ready;
+    }
+
+    int wait(Duration d = 0.seconds) @safe {
+        return _task.wait(d);
+    }
+
+    auto waitAndGet() @property @safe {
+        _task.wait();
+        return get();
+    }
+}
+
+//auto future(fioTask, F, A...)(fioTask t, F f, A a) if ( isCallable!(typeof(f)) ) {
+//    void fun() {
+//        f(a);
+//    }
+//    t.wait();
+//    return new fioTask(&fun);
+//}
+//
+//auto future(F, A...)(F f, A a) if ( isCallable!(typeof(f)) ) {
+//    void fun() {
+//        f(a);
+//    }
+//    return new fioTask(&fun);
+//}
+//
 void fioSleep(in Duration d) {
     auto t = scoped!AsyncTimer(evl);
     auto f = Fiber.getThis();
@@ -358,7 +462,8 @@ class fioTCPConnection {
 }
 
 class fioDaemonTask: fioTask {
-    @disable override void wait() {};
+    @disable override int wait(Duration d) {return 0;};
+    @disable override bool ready() @property @trusted nothrow const {return false;};
     this(void delegate() f) {
         super(f, true);
     }
@@ -376,13 +481,37 @@ class fioTask : Fiber {
         runnables ~= this;
     }
 
-    void wait() {
+    bool ready() @property @trusted nothrow const {
+        return state == Fiber.State.TERM;
+    }
+
+    int wait(Duration d=0.seconds) @trusted {
         if ( state == Fiber.State.TERM ) {
-            return;
+            return 0;
         }
-        auto f = Fiber.getThis();
-        in_wait ~= f;
+        auto timer = scoped!AsyncTimer(evl);
+        auto thisFiber = Fiber.getThis();
+        bool _timedout;
+
+        if ( d != 0.seconds ) {
+            timer.duration = d;
+            timer.run({
+                _timedout = true;
+                runnables ~= thisFiber;
+                // remove this fiber from in_wait list
+                auto i = countUntil(in_wait, thisFiber);
+                if ( i >= 0 ) {
+                    in_wait = remove(in_wait, i);
+                }
+            });
+        }
+        in_wait ~= thisFiber;
         Fiber.yield();
+        if ( _timedout ) {
+            return TIMEOUT;
+        } else {
+            return 0;
+        }
     }
 
 private:
@@ -409,12 +538,14 @@ private:
 
 class fioFiber: Fiber {
     // this is master of all fibers
+    bool stopped = false;
     this() {
         super(&run);
     }
 private:
     void run() {
         // This is fiber's main coordination loop
+        trace("ioloop started");
         while ( !stopped ) {
             while ( runnables.length ) {
                 auto f = runnables.front();
@@ -435,33 +566,59 @@ private:
             evl.loop(60.seconds);
             trace("ev loop wakeup");
         }
+        trace("ioloop stopped");
     }
 }
 
 void runEventLoop() {
+    if ( loop is null ) {
+        loop = new fioFiber();
+    }
     loop.call();
 }
 void stopEventLoop() {
-    stopped = true;
+    loop.stopped = true;
+    loop = null;
 }
 
 unittest {
-    globalLogLevel(LogLevel.info);
-    auto l_evl = new EventLoop();
+    globalLogLevel(LogLevel.trace);
+//    auto l_evl = new EventLoop();
     void testAll() {
         info("Test wait");
-        void t() {
+        auto task = new fioTask({
             info("t started");
             fioSleep(1.seconds);
             info("t finished");
-        }
-        auto task = new fioTask(&t);
+        });
         auto start = Clock.currTime();
         task.wait();
         auto stop = Clock.currTime();
         assert(990.msecs < stop - start && stop - start < 1010.msecs);
+        task = new fioTask({
+            info("t started");
+            fioSleep(1.seconds);
+            info("t finished");
+        });
+        start = Clock.currTime();
+        auto rc = task.wait(500.msecs); // wait with timeout
+        stop = Clock.currTime();
+        assert(rc == TIMEOUT);
+        assert(400.msecs < stop - start && stop - start < 600.msecs);
+        task.wait(); // finally wait
         info("Test wait - ok");
 
+        {
+            void ff1(string s) {
+                writefln("from future1: %s", s);
+            }
+            void ff2(int i) {
+                writefln("from future2: %d", i);
+            }
+            int increment(int i) {
+                return i+1;
+            }
+        }
         globalLogLevel(LogLevel.info);
         info("Test task create/destroy");
         int loops = 50000;
@@ -692,6 +849,7 @@ unittest {
         info("Test connection - ok");
         stopEventLoop();
     }
+    info("tesing all");
     new fioTask(&testAll);
     runEventLoop();
     writeln("Test finished");
