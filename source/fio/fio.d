@@ -88,8 +88,86 @@ static this() {
     loop = new fioFiber;
 }
 
-interface Wait {
-    int wait(Duration);
+class Daemon(F, A...) {
+  private:
+    F           g;
+    A           a;
+    fioTask    _task;
+  public:
+    this(F f, A a) @safe pure {
+        this.g = f;
+        this.a = a;
+    }
+    auto run() {
+        _task = new fioTask({
+                g(a);
+        }, true);
+        return this;
+    }
+}
+
+class Future(F, A...) {
+  private:
+    F             g;
+    A             a;
+    fioTask _task;
+  public:
+    this(F f, A a) @safe pure {
+        this.g = f;
+        this.a = a;
+    }
+
+    static if ( is (ReturnType!F==void) ) {
+        private auto _result = null;
+        auto run() {
+            _task = new fioTask({
+                g(a);
+            });
+            return this;
+        }
+    } else {
+        private ReturnType!F _result;
+        auto run() {
+            _task = new fioTask({
+                _result = g(a);
+            });
+            return this;
+        }
+    }
+
+    auto get() @property @safe {
+        if ( ready ) {
+            return _result;
+        }
+        throw ResultNotReady;
+    }
+
+    bool ready() @property @safe {
+        return _task !is null && _task.ready;
+    }
+
+    int wait(Duration d = 0.seconds) {
+        if ( _task is null ) {
+            run();
+        }
+        return _task.wait(d);
+    }
+
+    auto waitAndGet() @property {
+        if ( _task is null ) {
+            run();
+        }
+        _task.wait();
+        return get();
+    }
+}
+
+auto makeFuture(F, A...)(F f, A a) @safe pure nothrow {
+  return new Future!(F, A)(f, a);
+}
+
+auto makeDaemon(F, A...)(F f, A a) @safe pure nothrow {
+    return new Daemon!(F, A)(f, a);
 }
 
 int[] waitAll(W)(W tasks, Duration d = 0.seconds) {
@@ -101,25 +179,41 @@ int[] waitAll(W)(W tasks, Duration d = 0.seconds) {
     }
     return result;
 }
+
 unittest {
     globalLogLevel(LogLevel.info);
-    info("Test Future!");
+    info("Test Future");
     new fioTask((){
-        Wait[] jobs;
         int base = 1;
-        int f2(int a) {
-            trace("f2 enter");
-            fioSleep(dur!"seconds"(a));
-            trace("f2 leave after %d sleep", a);
-            return a+base;
+        void f0() {
         }
-        auto tasks = map!(a => new Future!f2(a))([1, 2, 3]).array();
+        int f1(int a) {
+            return a;
+        }
+        int f2(int a, int b) {
+            infof("f2 sleep, wait %d seconds, please.", a);
+            fioSleep(dur!"seconds"(a));
+            return b+base;
+        }
+        auto t0 = makeFuture(&f0);
+        auto t1 = makeFuture(&f1, 1);
+        auto t2 = makeFuture(&f2, 5, 1);
+        auto t3 = makeFuture((string s) {
+                infof("Future delegate '%s' - ok", s);
+            }, "hello");
+        auto t = tuple(t0, t1, t2, t3);
+        t.waitAll();
+        info("Future waitAll - ok");
+        auto tasks = map!(a => makeFuture(&f1, a).run)([1, 2, 3]).array();
+        tasks ~= makeFuture(&f1,4).run;
         fioSleep(1.seconds);
-        assert(tasks.map!(a => a.waitAndGet).array() == [2,3,4]);
-        info("tasks waitAndGet - ok");
-        tasks = map!(a => new Future!f2(a))([1, 2, 3]).array();
-        waitAll(tasks);
-        info("tasks waitAll - ok");
+        assert(tasks.map!(a => a.waitAndGet).array() == [1,2,3,4]);
+        info("Future waitAndGet - ok");
+        auto d = makeDaemon(
+                (int a) {
+                    infof("Daemon got %d and return", a);
+                }, 1
+            ).run();
         stopEventLoop();
     });
     runEventLoop();
@@ -127,51 +221,6 @@ unittest {
 }
 
 
-class Future(alias f) {
-    fioTask _task;
-
-    static if ( is (ReturnType!f==void) ) {
-        this(ParameterTypeTuple!f a) {
-            void run() {
-                f(a);
-            }
-            _task = new fioTask(&run);
-        }
-        auto get() @property @safe {
-            if ( ready ) {
-                return null;
-            }
-            throw ResultNotReady;
-        }
-    } else {
-        ReturnType!f _result;
-        this(ParameterTypeTuple!f a) {
-            void run() {
-                _result = f(a);
-            }
-            _task = new fioTask(&run);
-        }
-        ReturnType!f get() @property @safe {
-            if ( ready ) {
-                return _result;
-            }
-            throw ResultNotReady;
-        }
-    }
-
-    bool ready() @property @safe {
-        return _task !is null && _task.ready;
-    }
-
-    int wait(Duration d = 0.seconds) @safe {
-        return _task.wait(d);
-    }
-
-    auto waitAndGet() @property @safe {
-        _task.wait();
-        return get();
-    }
-}
 
 //auto future(fioTask, F, A...)(fioTask t, F f, A a) if ( isCallable!(typeof(f)) ) {
 //    void fun() {
@@ -474,7 +523,7 @@ class fioTask : Fiber {
     Fiber[]			in_wait;
     bool            daemon;
 
-    this(void delegate() f, bool daemon=false) {
+    this(void delegate() f, bool daemon=false) @trusted {
         super(&run, 64*1024);
         this.f = f;
         this.daemon = daemon;
