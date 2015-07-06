@@ -6,7 +6,6 @@ private import std.experimental.logger;
 private import std.socket;
 private import std.format;
 private import std.array;
-//private import std.range;
 private import std.conv;
 private import std.traits;
 private import std.typecons;
@@ -69,12 +68,12 @@ struct Ring {
     }
 }
 
-private static EventLoop 	evl;
-private static fioFiber  	loop;
-
-private static Ring          runnables;
-private static bool[fioTask]    started;
-private static bool[fioTask]    zombie;
+private static EventLoop 	   evl;
+private static fioFiber  	   loop;
+private static int             _STACKSIZE;
+private static Ring            runnables;
+private static bool[fioTask]   started;
+private static bool[fioTask]   zombie;
 
 enum {
     ERROR = -1,
@@ -86,6 +85,7 @@ enum BACKLOG = 1024;
 static this() {
     evl = new EventLoop;
     loop = new fioFiber;
+    _STACKSIZE = 64*1024; // default stacksize
 }
 
 class Daemon(F, A...) {
@@ -98,12 +98,20 @@ class Daemon(F, A...) {
         this.g = f;
         this.a = a;
     }
-    auto run() {
+    auto run() @safe {
         _task = new fioTask({
                 g(a);
         }, true);
         return this;
     }
+}
+
+int stacksize() @property {
+    return _STACKSIZE;
+}
+
+void stacksize(int s) @property {
+    _STACKSIZE = s;
 }
 
 class Future(F, A...) {
@@ -119,7 +127,7 @@ class Future(F, A...) {
 
     static if ( is (ReturnType!F==void) ) {
         private auto _result = null;
-        auto run() {
+        auto run() @safe {
             _task = new fioTask({
                 g(a);
             });
@@ -127,7 +135,7 @@ class Future(F, A...) {
         }
     } else {
         private ReturnType!F _result;
-        auto run() {
+        auto run() @safe {
             _task = new fioTask({
                 _result = g(a);
             });
@@ -153,14 +161,15 @@ class Future(F, A...) {
         return _task.wait(d);
     }
 
-    auto waitAndGet() @property {
+    auto waitAndGet(Duration d = 0.seconds) @property {
         if ( _task is null ) {
             run();
         }
-        _task.wait();
+        _task.wait(d);
         return get();
     }
 }
+
 
 auto makeFuture(F, A...)(F f, A a) @safe pure nothrow {
   return new Future!(F, A)(f, a);
@@ -170,12 +179,31 @@ auto makeDaemon(F, A...)(F f, A a) @safe pure nothrow {
     return new Daemon!(F, A)(f, a);
 }
 
+auto makeApp(F, A...)(F f, A a) @safe {
+    makeDaemon({
+        auto w = makeFuture(f, a);
+        w.wait();
+        stopEventLoop();
+    }).run();
+}
+
 int[] waitAll(W)(W tasks, Duration d = 0.seconds) {
     int[]   result;
     Duration timeleft = d;
     foreach(t; tasks) {
-        auto r = t.wait(timeleft);
-        result ~= r;
+        if ( timeleft > 0.seconds ) {
+            auto start = Clock.currTime;
+            auto r = t.wait(timeleft);
+            result ~= r;
+            auto stop = Clock.currTime;
+            timeleft -= stop - start;
+        } else {
+            if ( t.ready ) {
+                result ~= 0;
+            } else {
+                result ~= TIMEOUT;
+            }
+        }
     }
     return result;
 }
@@ -195,14 +223,14 @@ unittest {
             fioSleep(dur!"seconds"(a));
             return b+base;
         }
-        auto t0 = makeFuture(&f0);
-        auto t1 = makeFuture(&f1, 1);
-        auto t2 = makeFuture(&f2, 5, 1);
+        auto t0 = makeFuture(&f0).run();
+        auto t1 = makeFuture(&f1, 1).run();
+        auto t2 = makeFuture(&f2, 5, 1).run();
         auto t3 = makeFuture((string s) {
-                infof("Future delegate '%s' - ok", s);
-            }, "hello");
+                assert(s == "hello");
+            }, "hello").run();
         auto t = tuple(t0, t1, t2, t3);
-        t.waitAll();
+        assert(t.waitAll(1.seconds) == [0,0,TIMEOUT,0]);
         info("Future waitAll - ok");
         auto tasks = map!(a => makeFuture(&f1, a).run)([1, 2, 3]).array();
         tasks ~= makeFuture(&f1,4).run;
@@ -220,23 +248,6 @@ unittest {
     info("Test Future! Done");
 }
 
-
-
-//auto future(fioTask, F, A...)(fioTask t, F f, A a) if ( isCallable!(typeof(f)) ) {
-//    void fun() {
-//        f(a);
-//    }
-//    t.wait();
-//    return new fioTask(&fun);
-//}
-//
-//auto future(F, A...)(F f, A a) if ( isCallable!(typeof(f)) ) {
-//    void fun() {
-//        f(a);
-//    }
-//    return new fioTask(&fun);
-//}
-//
 void fioSleep(in Duration d) {
     auto t = scoped!AsyncTimer(evl);
     auto f = Fiber.getThis();
@@ -524,7 +535,7 @@ class fioTask : Fiber {
     bool            daemon;
 
     this(void delegate() f, bool daemon=false) @trusted {
-        super(&run, 64*1024);
+        super(&run, _STACKSIZE);
         this.f = f;
         this.daemon = daemon;
         runnables ~= this;
@@ -632,7 +643,6 @@ void stopEventLoop() {
 
 unittest {
     globalLogLevel(LogLevel.trace);
-//    auto l_evl = new EventLoop();
     void testAll() {
         info("Test wait");
         auto task = new fioTask({
