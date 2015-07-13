@@ -5,9 +5,11 @@ private import std.datetime;
 private import std.experimental.logger;
 private import std.socket;
 private import std.format;
+private import std.algorithm;
 private import std.array;
 private import std.conv;
 private import std.traits;
+private import core.sys.posix.unistd;
 private import std.typecons;
 private import std.algorithm: remove, countUntil, map, each;
 private import core.thread;
@@ -32,6 +34,8 @@ static this() {
     RingEmpty = new Exception("Ring empty");
     RingFull = new Exception("Ring full");
     ResultNotReady = new Exception("Task not ready");
+    loop = new fioFiber;
+    _STACKSIZE = 64*1024; // default stacksize
 }
 
 struct Ring {
@@ -82,26 +86,20 @@ enum {
 
 enum BACKLOG = 1024;
 
-static this() {
-    evl = new EventLoop;
-    loop = new fioFiber;
-    _STACKSIZE = 64*1024; // default stacksize
-}
-
 class Daemon(F, A...) {
   private:
     F           g;
     A           a;
-    fioTask    _task;
+    fioDaemonTask    _task;
   public:
     this(F f, A a) @safe pure {
         this.g = f;
         this.a = a;
     }
-    auto run() @safe {
-        _task = new fioTask({
+    auto start() {
+        _task = new fioDaemonTask({
                 g(a);
-        }, true);
+        });
         return this;
     }
 }
@@ -127,7 +125,7 @@ class Future(F, A...) {
 
     static if ( is (ReturnType!F==void) ) {
         private auto _result = null;
-        auto run() @safe {
+        auto start() @safe {
             _task = new fioTask({
                 g(a);
             });
@@ -135,7 +133,7 @@ class Future(F, A...) {
         }
     } else {
         private ReturnType!F _result;
-        auto run() @safe {
+        auto start() @safe {
             _task = new fioTask({
                 _result = g(a);
             });
@@ -156,14 +154,14 @@ class Future(F, A...) {
 
     int wait(Duration d = 0.seconds) {
         if ( _task is null ) {
-            run();
+            start();
         }
         return _task.wait(d);
     }
 
     auto waitAndGet(Duration d = 0.seconds) @property {
         if ( _task is null ) {
-            run();
+            start();
         }
         _task.wait(d);
         return get();
@@ -179,12 +177,26 @@ auto makeDaemon(F, A...)(F f, A a) @safe pure nothrow {
     return new Daemon!(F, A)(f, a);
 }
 
-auto makeApp(F, A...)(F f, A a) @safe {
-    makeDaemon({
+auto makeApp(F, A...)(F f, A a) {
+    makeFuture({
         auto w = makeFuture(f, a);
         w.wait();
         stopEventLoop();
-    }).run();
+    }).start();
+}
+
+int waitForAllDaemons(Duration timeout = 0.seconds) {
+    //
+    // wait(polling) until all started daemon tasks finish
+    //
+    auto deadline = Clock.currTime + timeout;
+    while ( !started.keys.filter!(t => t.daemon).empty ) {
+        fioSleep(100.msecs);
+        if ( timeout > 0.seconds && Clock.currTime > deadline ) {
+            return TIMEOUT;
+        }
+    }
+    return 0;
 }
 
 int[] waitAll(W)(W tasks, Duration d = 0.seconds) {
@@ -223,17 +235,17 @@ unittest {
             fioSleep(dur!"seconds"(a));
             return b+base;
         }
-        auto t0 = makeFuture(&f0).run();
-        auto t1 = makeFuture(&f1, 1).run();
-        auto t2 = makeFuture(&f2, 5, 1).run();
+        auto t0 = makeFuture(&f0).start();
+        auto t1 = makeFuture(&f1, 1).start();
+        auto t2 = makeFuture(&f2, 5, 1).start();
         auto t3 = makeFuture((string s) {
                 assert(s == "hello");
-            }, "hello").run();
+            }, "hello").start();
         auto t = tuple(t0, t1, t2, t3);
         assert(t.waitAll(1.seconds) == [0,0,TIMEOUT,0]);
         info("Future waitAll - ok");
-        auto tasks = map!(a => makeFuture(&f1, a).run)([1, 2, 3]).array();
-        tasks ~= makeFuture(&f1,4).run;
+        auto tasks = map!(a => makeFuture(&f1, a).start)([1, 2, 3]).array();
+        tasks ~= makeFuture(&f1,4).start;
         fioSleep(1.seconds);
         assert(tasks.map!(a => a.waitAndGet).array() == [1,2,3,4]);
         info("Future waitAndGet - ok");
@@ -241,7 +253,7 @@ unittest {
                 (int a) {
                     infof("Daemon got %d and return", a);
                 }, 1
-            ).run();
+            ).start();
         stopEventLoop();
     });
     runEventLoop();
@@ -266,29 +278,65 @@ class fioTCPListener {
     Socket 	so;
     asyncAccept acceptor;
 
+    static if ( is(SocketOption.REUSEPORT) ) {
+        auto So_REUSEPORT = SocketOption.REUSEPORT;
+    } else {
+        auto So_REUSEPORT = cast(SocketOption)15;
+    }
+
     this(string host, ushort port, void delegate(fioTCPConnection) d) {
         server = d;
         _address = getAddress(host, port)[0];
         so = new Socket(_address.addressFamily, SocketType.STREAM, ProtocolType.TCP);
         so.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, 1);
+        so.setOption(SocketOptionLevel.SOCKET, So_REUSEPORT, 1);
         so.bind(_address);
         so.listen(BACKLOG);
-        acceptor = new asyncAccept(evl, so, &run);
         trace("Listener started");
+    }
+
+    auto start() {
+        if ( evl is null ) {
+            evl = new EventLoop;
+        }
+        acceptor = new asyncAccept(evl, so, &run);
+        return this;
+    }
+    auto fork(int n) {
+        while(n) {
+            auto pid = .fork();
+            if ( pid ) {
+                n--;
+            } else if ( pid == 0 ) {
+                return;
+            }
+        }
     }
 
     void run(Event e) {
         trace("handle new incoming connection");
-        void run() {
-            auto newSo = so.accept();
-            auto fio_connection = scoped!fioTCPConnection(newSo);
-            scope(exit) {
-                fio_connection.close();
-                destroy(newSo);
+//        void run() {
+//            auto newSo = so.accept();
+//            auto fio_connection = scoped!fioTCPConnection(newSo);
+//            scope(exit) {
+//                fio_connection.close();
+//                destroy(newSo);
+//            }
+//            server(fio_connection);
+//        }
+        auto server_task = new fioDaemonTask({
+            try {
+                auto newSo = so.accept();
+                auto fio_connection = scoped!fioTCPConnection(newSo);
+                scope(exit) {
+                    fio_connection.close();
+                    destroy(newSo);
+                }
+                server(fio_connection);
+            } catch (SocketAcceptException e) {
+                trace("SocketAcceptException");
             }
-            server(fio_connection);
-        }
-        auto server_task = new fioDaemonTask(&run);
+        });
     }
 
     void  close() {
@@ -315,7 +363,6 @@ class fioTCPConnection {
 
     this(Socket so) {
         this.so = so;
-        thisFiber = Fiber.getThis();
         this._async_connection = new asyncConnection(evl, so);
     }
 
@@ -631,6 +678,9 @@ private:
 }
 
 void runEventLoop() {
+    if ( evl is null ) {
+        evl = new EventLoop();
+    }
     if ( loop is null ) {
         loop = new fioFiber();
     }
@@ -772,10 +822,10 @@ unittest {
             infof("%s:%d, tmo=%s passed", "localhost", 9998, to!string(0.seconds));
             info("test dumb listener");
             void dumb_server(fioTCPConnection c) {
-                // nothing
             }
             foreach(int j; 0..10000) {
                 auto dumb_server_listener = scoped!fioTCPListener("localhost", cast(ushort)9997, &dumb_server);
+                dumb_server_listener.start();
                 loops = 100;
                 foreach(i;0..loops) {
                     auto c = scoped!fioTCPConnection("localhost", cast(ushort)9997, 10.seconds);
@@ -820,7 +870,7 @@ unittest {
                 } while (rc > 0);
                 info("echo server loop done");
             }
-            auto listener = new fioTCPListener("localhost", 9999, &test_server);
+            auto listener = new fioTCPListener("localhost", 9999, &test_server).start();
             string host = "localhost";
             ushort port = 9999;
             Duration t = 5.seconds;
