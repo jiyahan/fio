@@ -14,6 +14,7 @@ private import std.typecons;
 private import std.algorithm: remove, countUntil, map, each;
 private import core.thread;
 private import core.memory;
+private import core.exception;
 private import core.sys.posix.unistd : pipe, write;
 private import poll;
 private import ipaddr;
@@ -653,17 +654,14 @@ private:
     void run() {
         // This is fiber's main coordination loop
         trace("ioloop started");
+        Throwable exception;
         while ( !stopped ) {
             while ( runnables.length ) {
                 auto f = runnables.front();
                 runnables.popFront();
-                try {
-                    f.call(Rethrow.yes);
-                } catch (Exception e) {
-                    error("fio catched Exception: " ~ e.toString);
-                }
+                exception = f.call(Rethrow.no);
             }
-            if ( stopped ) {
+            if ( stopped || exception ) {
                 break;
             }
             foreach(ref z; zombie.byKey) {
@@ -674,6 +672,11 @@ private:
             trace("ev loop wakeup");
         }
         trace("ioloop stopped");
+        if ( exception ) {
+            loop.stopped = true;
+            loop = null;
+            throw exception;
+        }
     }
 }
 
@@ -690,6 +693,25 @@ void stopEventLoop() {
     loop.stopped = true;
     loop = null;
 }
+
+unittest {
+    globalLogLevel(LogLevel.info);
+    info("Test exception");
+    makeApp((){
+        void f0() {
+            auto aa = [1:1];
+            auto bb = aa[2]; // this will throw exception
+        }
+        auto t0 = makeFuture(&f0).start();
+        t0.wait();
+    });
+    try {
+        runEventLoop();
+    } catch (RangeError e) {
+        info("Test exception Done");
+    }
+}
+
 
 unittest {
     globalLogLevel(LogLevel.trace);
