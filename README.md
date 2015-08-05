@@ -9,7 +9,7 @@ Current features:
 * TCP client and server code
 * fork for TCP server
 
-See examples if _examples_ folder
+See examples in _examples_ folder
 
     import std.format;
     import std.experimental.logger;
