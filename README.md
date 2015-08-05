@@ -47,4 +47,6 @@ See examples in _examples_ folder
     }
 
 
+Current limitations:
+* works only with linux epoll
 
