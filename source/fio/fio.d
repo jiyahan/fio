@@ -10,6 +10,7 @@ private import std.array;
 private import std.conv;
 private import std.traits;
 private import core.sys.posix.unistd;
+private import core.sys.posix.sys.wait: wait;
 private import std.typecons;
 private import std.algorithm: remove, countUntil, map, each;
 private import core.thread;
@@ -17,7 +18,7 @@ private import core.memory;
 private import core.exception;
 private import core.sys.posix.unistd : pipe, write;
 private import poll;
-private import ipaddr;
+//private import ipaddr;
 
 template frm(alias v) {
     string frm() {
@@ -39,10 +40,10 @@ static this() {
     _STACKSIZE = 64*1024; // default stacksize
 }
 
-struct Ring {
-    ///
-    /// cyclic buffer for runnable fibers
-    ///
+///
+/// cyclic buffer for runnable fibers
+///
+private struct Ring {
     int _front;
     int _back;
     Fiber[1024] holder;
@@ -87,16 +88,31 @@ enum {
 
 enum BACKLOG = 1024;
 
+///
+/// Excecution unit that run in "background" - you can't wait for its completion
+///
 class Daemon(F, A...) {
   private:
     F           g;
     A           a;
     fioDaemonTask    _task;
   public:
+    ///
+    /// Constructor
+    /// Params:
+    /// f = function or generator
+    /// a = args to call f
+    ///
     this(F f, A a) @safe pure {
         this.g = f;
         this.a = a;
     }
+    ///
+    /// You have to call start() method to start daemon running
+    /// Params:
+    ///
+    /// Return:
+    ///  Daemon object (you can chain calls)
     auto start() {
         _task = new fioDaemonTask({
                 g(a);
@@ -105,25 +121,41 @@ class Daemon(F, A...) {
     }
 }
 
+///
+/// Get stack size for new fibers
+///
 int stacksize() @property {
     return _STACKSIZE;
 }
-
+///
+/// Set stack size for new fibers
+///
 void stacksize(int s) @property {
     _STACKSIZE = s;
 }
 
+///
+/// Execution unit that run in "foreground" - you can wait for completion and get results
+///
 class Future(F, A...) {
   private:
     F             g;
     A             a;
     fioTask _task;
   public:
+    ///
+    /// Constructor
+    /// Params:
+    /// f = function or generator
+    /// a = args to call f
+    ///
     this(F f, A a) @safe pure {
         this.g = f;
         this.a = a;
     }
-
+    ///
+    /// You have to call start() to start Future execution
+    ///
     static if ( is (ReturnType!F==void) ) {
         private auto _result = null;
         auto start() @safe {
@@ -141,18 +173,31 @@ class Future(F, A...) {
             return this;
         }
     }
-
+    ///
+    /// Get return value of f when f completes.
+    ///
     auto get() @property @safe {
         if ( ready ) {
             return _result;
         }
         throw ResultNotReady;
     }
-
+    ///
+    /// Get completion status and result readiness
+    ///
+    /// Return:
+    ///   True if task were started and were finished
+    ///
     bool ready() @property @safe {
         return _task !is null && _task.ready;
     }
-
+    ///
+    /// Wait for task completion. Also start task if you forget to call method start()
+    /// Params:
+    ///		d = how long to wait (forewer by default)
+    /// Return:
+    ///		status of wait (SUCCESS or TIMEDOUT)
+    ///
     int wait(Duration d = 0.seconds) {
         if ( _task is null ) {
             start();
@@ -160,6 +205,13 @@ class Future(F, A...) {
         return _task.wait(d);
     }
 
+    ///
+    /// Wait for task completion and return result. Also start task if you forget to call method start()
+    /// Params:
+    ///		d = how long to wait (forewer by default)
+    /// Return:
+    ///		result of f, or exceptioin ResultNotReady if result is not ready after timeout d expired.
+    ///
     auto waitAndGet(Duration d = 0.seconds) @property {
         if ( _task is null ) {
             start();
@@ -169,58 +221,19 @@ class Future(F, A...) {
     }
 }
 
-
+///////////////////////////////////////////////////////////
+///
+/// makeFuture create "Future" - execution unit that you
+/// can start and wait for completion and get result
+/// Params:
+/// 	f = function or delegate to run
+///  a = args for calling f
+///
+///////////////////////////////////////////////////////////
 auto makeFuture(F, A...)(F f, A a) @safe pure nothrow {
   return new Future!(F, A)(f, a);
 }
-
-auto makeDaemon(F, A...)(F f, A a) @safe pure nothrow {
-    return new Daemon!(F, A)(f, a);
-}
-
-auto makeApp(F, A...)(F f, A a) {
-    makeFuture({
-        auto w = makeFuture(f, a);
-        w.wait();
-        stopEventLoop();
-    }).start();
-}
-
-int waitForAllDaemons(Duration timeout = 0.seconds) {
-    //
-    // wait(polling) until all started daemon tasks finish
-    //
-    auto deadline = Clock.currTime + timeout;
-    while ( !started.keys.filter!(t => t.daemon).empty ) {
-        fioSleep(100.msecs);
-        if ( timeout > 0.seconds && Clock.currTime > deadline ) {
-            return TIMEOUT;
-        }
-    }
-    return 0;
-}
-
-int[] waitAll(W)(W tasks, Duration d = 0.seconds) {
-    int[]   result;
-    Duration timeleft = d;
-    foreach(t; tasks) {
-        if ( timeleft > 0.seconds ) {
-            auto start = Clock.currTime;
-            auto r = t.wait(timeleft);
-            result ~= r;
-            auto stop = Clock.currTime;
-            timeleft -= stop - start;
-        } else {
-            if ( t.ready ) {
-                result ~= 0;
-            } else {
-                result ~= TIMEOUT;
-            }
-        }
-    }
-    return result;
-}
-
+///
 unittest {
     globalLogLevel(LogLevel.info);
     info("Test Future");
@@ -261,6 +274,119 @@ unittest {
     info("Test Future! Done");
 }
 
+//////////////////////////////////////////////////////////////////////////
+///
+/// makeDaemon create "Daemon" - execution unit that you
+/// can start but can't wait for completion or get result.
+/// All you can do with daemons - wait when all daemons finish with call
+/// waitForAllDaemons()
+/// Params:
+/// 	f = function or delegate to run
+///  a = args for calling f
+///
+//////////////////////////////////////////////////////////////////////////
+auto makeDaemon(F, A...)(F f, A a) @safe pure nothrow {
+    return new Daemon!(F, A)(f, a);
+}
+
+/**
+ *
+ * makeApp create "Future" that
+ * will stop eventLoop when completed
+ *
+ * Params:
+ * 	f = function or delegate to run
+ *  a = args for calling f
+ * Return:
+ *  Nothing
+ *
+ **/
+auto makeApp(F, A...)(F f, A a) {
+    makeFuture({
+        auto w = makeFuture(f, a);
+        w.wait();
+        stopEventLoop();
+    }).start();
+}
+///
+unittest {
+    globalLogLevel(LogLevel.info);
+    info("Test makeApp");
+    makeApp((){
+        void f0() {
+            auto aa = [1:1];
+        }
+        auto t0 = makeFuture(&f0).start();
+        t0.wait();
+    });
+    runEventLoop();
+    info("App finished");
+}
+
+/////////////////////////////////////////////////////////////////
+///
+/// wait(polling used) until all started daemon tasks finish
+/// Params:
+/// timeout = ,how long to wait
+/// Return:
+/// TIMEOUT or 0
+///
+/////////////////////////////////////////////////////////////////
+int waitForAllDaemons(Duration timeout = 0.seconds) {
+    //
+    // wait(polling) until all started daemon tasks finish
+    //
+    auto deadline = Clock.currTime + timeout;
+    while ( !started.keys.filter!(t => t.daemon).empty ) {
+        fioSleep(100.msecs);
+        if ( timeout > 0.seconds && Clock.currTime > deadline ) {
+            return TIMEOUT;
+        }
+    }
+    return 0;
+}
+
+/////////////////////////////////////////////////////////////////
+///
+/// Wait until all tasks in array finish
+/// Params:
+///		tasks = range of objects, supporting wait()
+///		d = time to wait
+/// Return:
+///		array of the 0(success) and TIMEOUT(failed to wait)
+///
+/////////////////////////////////////////////////////////////////
+int[] waitAll(W)(W tasks, Duration d = 0.seconds) {
+    int[]   result;
+    Duration timeleft = d;
+    foreach(t; tasks) {
+        if ( timeleft > 0.seconds ) {
+            auto start = Clock.currTime;
+            auto r = t.wait(timeleft);
+            result ~= r;
+            auto stop = Clock.currTime;
+            timeleft -= stop - start;
+        } else {
+            if ( t.ready ) {
+                result ~= 0;
+            } else {
+                result ~= TIMEOUT;
+            }
+        }
+    }
+    return result;
+}
+
+//////////////////////////////////////////////////////////////
+/// sleep for some duration.
+///		you have to use this sleep as it allow concurrency
+///	Params:
+///		d = duration
+///	Return:
+///		void
+///	Examples:
+///		`fioSleep(1.seconds)`
+///////////////////////////////////////////////////////////////
 void fioSleep(in Duration d) {
     auto t = scoped!AsyncTimer(evl);
     auto f = Fiber.getThis();
@@ -270,14 +396,30 @@ void fioSleep(in Duration d) {
     });
     Fiber.yield();  // pass control to main
 }
+///////////////////////////////////////////////////////////////
+///
+/// Create TCPListener
+///	Params:
+///		host = interface to listen
+///		port = port to listen
+///		f = function or delegate to execute on each connectiom
+/// Return:
+///		instance of class fioTCPListener
+///
+///////////////////////////////////////////////////////////////
+auto makeTCPListener(F)(string host, ushort port, F f) {
+    return new fioTCPListener!(F)(host, port, f);
+}
 
-class fioTCPListener {
+class fioTCPListener(F) {
+    F       server;
+
     string 	host;
     ushort 	port;
-    void 	delegate(fioTCPConnection) server;
     Address _address;
     Socket 	so;
     asyncAccept acceptor;
+    uint    _childs;
 
     static if ( is(SocketOption.REUSEPORT) ) {
         auto So_REUSEPORT = SocketOption.REUSEPORT;
@@ -285,9 +427,10 @@ class fioTCPListener {
         auto So_REUSEPORT = cast(SocketOption)15;
     }
 
-    this(string host, ushort port, void delegate(fioTCPConnection) d) {
+    this(string host, ushort port, F d) {
         server = d;
         _address = getAddress(host, port)[0];
+        _childs = 0;
         so = new Socket(_address.addressFamily, SocketType.STREAM, ProtocolType.TCP);
         so.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, 1);
         so.setOption(SocketOptionLevel.SOCKET, So_REUSEPORT, 1);
@@ -308,23 +451,23 @@ class fioTCPListener {
             auto pid = .fork();
             if ( pid ) {
                 n--;
+                _childs++;
             } else if ( pid == 0 ) {
-                return;
+                return 0;
             }
         }
+        return 1;
     }
 
+    auto waitForForkedChilds() {
+        while( _childs ) {
+            int s;
+            .wait(&s);
+            _childs--;
+        }
+    }
     void run(Event e) {
         trace("handle new incoming connection");
-//        void run() {
-//            auto newSo = so.accept();
-//            auto fio_connection = scoped!fioTCPConnection(newSo);
-//            scope(exit) {
-//                fio_connection.close();
-//                destroy(newSo);
-//            }
-//            server(fio_connection);
-//        }
         auto server_task = new fioDaemonTask({
             try {
                 auto newSo = so.accept();
@@ -509,7 +652,7 @@ class fioTCPConnection {
         }
 
         if ( _async_connection.instream_closed ) {
-            return 0; /// closed already
+            return 0; // closed already
         }
 
         scope(exit) {
@@ -540,10 +683,10 @@ class fioTCPConnection {
                     return;
                 default:
                     received += rc;
-                    if ( partial || ( received >= buff.length)) { /// return to caller
+                    if ( partial || ( received >= buff.length)) { // return to caller
                         runnables ~= thisFiber;
                     }
-                    /// continue to receive
+                    // continue to receive
                     return;
                 }
             }
@@ -689,6 +832,7 @@ void runEventLoop() {
     }
     loop.call();
 }
+
 void stopEventLoop() {
     loop.stopped = true;
     loop = null;
@@ -777,7 +921,6 @@ unittest {
         }
         info("Test task create/destroy - ok");
         fioSleep(5.seconds);
-        writeln(c, " s:", started.length," z:", zombie.length);
         globalLogLevel(LogLevel.info);
 
 
@@ -846,7 +989,7 @@ unittest {
             void dumb_server(fioTCPConnection c) {
             }
             foreach(int j; 0..10000) {
-                auto dumb_server_listener = scoped!fioTCPListener("localhost", cast(ushort)9997, &dumb_server);
+                auto dumb_server_listener = makeTCPListener("localhost", cast(ushort)9997, &dumb_server);
                 dumb_server_listener.start();
                 loops = 100;
                 foreach(i;0..loops) {
@@ -892,7 +1035,7 @@ unittest {
                 } while (rc > 0);
                 info("echo server loop done");
             }
-            auto listener = new fioTCPListener("localhost", 9999, &test_server).start();
+            auto listener = makeTCPListener("localhost", 9999, &test_server).start();
             string host = "localhost";
             ushort port = 9999;
             Duration t = 5.seconds;
