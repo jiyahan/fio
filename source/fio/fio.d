@@ -9,16 +9,19 @@ private import std.algorithm;
 private import std.array;
 private import std.conv;
 private import std.traits;
-private import core.sys.posix.unistd;
+//private import core.sys.posix.unistd;
 private import core.sys.posix.sys.wait: wait;
 private import std.typecons;
 private import std.algorithm: remove, countUntil, map, each;
 private import core.thread;
 private import core.memory;
 private import core.exception;
-private import core.sys.posix.unistd : pipe, write;
+private import core.sys.posix.unistd: fork;
+
 private import poll;
 //private import ipaddr;
+
+alias Partial = Flag!"Partial";
 
 template frm(alias v) {
     string frm() {
@@ -420,6 +423,8 @@ class fioTCPListener(F) {
     Socket 	so;
     asyncAccept acceptor;
     uint    _childs;
+    bool    stopped;
+    Fiber   servingFiber;
 
     static if ( is(SocketOption.REUSEPORT) ) {
         auto So_REUSEPORT = SocketOption.REUSEPORT;
@@ -445,6 +450,25 @@ class fioTCPListener(F) {
         }
         acceptor = new asyncAccept(evl, so, &run);
         return this;
+    }
+    auto stop() in {
+        assert(servingFiber !is null);
+    }
+    body {
+        stopped = true;
+        runnables ~= servingFiber;
+        servingFiber = null;
+    }
+
+    auto serve() in {
+        assert(servingFiber is null);
+    }
+    body {
+        // just sleep forewer
+        servingFiber = Fiber.getThis();
+        while ( !stopped ) {
+            Fiber.yield();
+        }
     }
     auto fork(int n) {
         while(n) {
@@ -625,7 +649,7 @@ class fioTCPConnection {
         return _sent;
     }
 
-    int recv(byte[] buff, in Duration timeout=0.seconds, bool partial=true)
+    int recv(byte[] buff, in Duration timeout=0.seconds, Partial partial=Partial.yes)
     /***********************************************
     * Receive data from socket
     * when data received from low level:
@@ -856,6 +880,31 @@ unittest {
     }
 }
 
+auto makeSignalHandler(F)(int sig, F f,  in string file = __FILE__ , in size_t line = __LINE__) @safe  {
+    return new SignalHandler!F(evl, sig, f, file, line);
+}
+unittest {
+    ///
+    /// test Signal
+    ///
+    import core.sys.posix.signal;
+    info("Test Signal");
+    bool    signalled;
+    makeApp((){
+        auto sig = makeSignalHandler(SIGINT, (int s){
+            infof("got signal %d", s);
+            signalled = true;
+        });
+        scope(exit) {
+            sig.restore();
+        }
+        kill(0, SIGINT);
+        fioSleep(1.seconds);
+        assert(signalled);
+    });
+    runEventLoop();
+    info("Test Signal done");
+}
 
 unittest {
     globalLogLevel(LogLevel.trace);
@@ -1070,14 +1119,14 @@ unittest {
                 assert(recv_rc == 4);
                 conn.send("1abc");
                 start = Clock.currTime();
-                recv_rc = conn.recv(buff, 3.seconds, false); // wait 3 sec, require full buff -> should be timeout
+                recv_rc = conn.recv(buff, 3.seconds, Partial.no); // wait 3 sec, require full buff -> should be timeout
                 stop = Clock.currTime();
                 infof("receive exactly %d bytes with 3 sec timeout(should timeout)", buff.length);
                 infof("received %d bytes in %s", recv_rc, to!string(stop-start));
                 assert(recv_rc == TIMEOUT);
                 conn.send("1234567890");
                 start = Clock.currTime();
-                recv_rc = conn.recv(buff, 3.seconds, false); // wait 3 sec, require full buff
+                recv_rc = conn.recv(buff, 3.seconds, Partial.no); // wait 3 sec, require full buff
                 stop = Clock.currTime();
                 infof("receive exactly %d bytes with 3 sec timeout(should succeed)", buff.length);
                 infof("received %d bytes in %s", recv_rc, to!string(stop-start));

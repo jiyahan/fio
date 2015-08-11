@@ -8,6 +8,9 @@ private import std.socket;
 private import std.format;
 private import core.sys.posix.time : itimerspec, CLOCK_REALTIME;
 private import core.sys.posix.unistd : close, read;
+private import core.sys.posix.signal;
+
+private import core.sys.linux.sys.signalfd;
 
 struct Event {
     enum {
@@ -62,6 +65,9 @@ extern(C) int epoll_ctl(int epfd, int op, int fd, epoll_event *event) @safe @nog
 extern(C) int epoll_wait(int epfd, epoll_event *events, int maxevents, int timeout) @safe @nogc nothrow;
 extern(C) int timerfd_create(int clockid, int flags) @safe @nogc nothrow;
 extern(C) int timerfd_settime(int fd, int flags, itimerspec* new_value, itimerspec* old_value) @safe @nogc nothrow;
+extern(C) int signalfd(int fd, const sigset_t *mask, int flags) @safe @nogc nothrow;
+extern(C) int sigaddset(const sigset_t *mask, int sig) @safe @nogc nothrow;
+extern(C) int sigprocmask(int, const sigset_t *, sigset_t *) @safe @nogc nothrow;
 
 enum MAXEVENTS = 1024;
 
@@ -93,7 +99,6 @@ class EventLoop {
         uint timeout_ms = cast(int)d.total!"msecs";
 
         uint ready = epoll_wait(epoll_fd, cast(epoll_event*)&events[0], MAXEVENTS, timeout_ms);
-//        trace("epoll_wait returned ", to!string(ready));
         if ( ready > 0 ) {
             foreach(i; 0..ready) {
                 auto e = events[i];
@@ -101,6 +106,51 @@ class EventLoop {
                 handler.handle(e);
             }
         }
+    }
+}
+
+class SignalHandler(F) : EventHandler {
+    int                  signal_fd;
+    int                  sig;
+    EventLoop            evl;
+    F                    dg;
+    ///
+    /// enable signal sig delivery to process only through signal_fd and delegate
+    /// Params:
+    ///		sig = signal
+    ///		dg = handler
+    ///
+    this(EventLoop evl, int sig, F dg, in string file = __FILE__ , in size_t line = __LINE__) @safe @nogc {
+        this.dg = dg;
+        static sigset_t m;
+        this.sig = sig;
+        sigaddset(&m, sig);
+        sigprocmask(SIG_BLOCK, &m, null);
+        this.signal_fd = signalfd(-1, &m, 0);
+        this.evl = evl;
+        auto e = epoll_event();
+        e.events = EPOLLET | EPOLLIN;
+        e.data.handler = this;
+        evl.add(this.signal_fd, e);
+    }
+
+    override void handle(epoll_event e) {
+        signalfd_siginfo si;
+        ssize_t res = read(this.signal_fd, &si, si.sizeof);
+        if ( res != si.sizeof ) {
+            errorf("Something wrong reading from signal_fd: got %d instead of %d", res, si.sizeof);
+            return;
+        }
+        dg(this.sig);
+    }
+    void restore() {
+        static sigset_t m;
+        sigaddset(&m, this.sig);
+        sigprocmask(SIG_UNBLOCK, &m, null);
+        auto e = epoll_event();
+        e.events = EPOLLET | EPOLLIN;
+        evl.del(this.signal_fd, e);
+        close(this.signal_fd);
     }
 }
 
@@ -125,13 +175,6 @@ class AsyncTimer : EventHandler {
 
    ~this() @safe @nogc nothrow {
        kill();
-//        if ( timer_fd != -1 ) {
-//            close(timer_fd);
-//            timer_fd = -1;
-//        }
-//        if ( caller !is null ) {
-//            destroy(caller);
-//        }
    }
 
     Duration duration() const @property @safe @nogc nothrow pure {

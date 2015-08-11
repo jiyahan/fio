@@ -1,6 +1,6 @@
 COMPILER=dmd
 
-all: app examples doc test
+all: app examples doc test lib
 
 test: source/fio/fio.d source/fio/poll.d
 	$(COMPILER) -main -unittest source/fio/fio.d source/fio/poll.d -gc -oftest -Isource/fio/
@@ -16,5 +16,9 @@ app: source/app.d
 clean:
 	rm -f test test.o app forked_server forked_server *.o
 
-doc: source/fio/fio.d docs/fio.html
+doc: source/fio/fio.d
 	$(COMPILER) -Dfdocs/fio.html source/app.d  source/fio/poll.d source/fio/fio.d -Isource/fio/
+
+lib: source/fio/fio.d source/fio/poll.d
+	$(COMPILER) -c -oflibfio.a source/fio/fio.d source/fio/poll.d
+
