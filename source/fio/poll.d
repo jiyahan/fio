@@ -10,8 +10,23 @@ private import core.sys.posix.time : itimerspec, CLOCK_REALTIME;
 private import core.sys.posix.unistd : close, read;
 private import core.sys.posix.signal;
 
-private import core.sys.linux.sys.signalfd;
+///
+/// event interface to kernel poll implementation (epoll or kqueue)
+///
+struct PollingEvent {
+    enum {
+        IN  	= 1,
+        OUT 	= 4,
+        ERR 	= 0x08,
+        HUP		= 0x10,
+    };
+    uint	     events;
+    EventHandler handler;
+}
 
+///
+/// event interface to upper level application
+///
 struct Event {
     enum {
         IN  	= 1,
@@ -24,86 +39,121 @@ struct Event {
     uint	events;
 }
 
-enum {
-    EPOLLIN         = 0x001,
-    EPOLLPRI        = 0x002,
-    EPOLLOUT        = 0x004,
-    EPOLLRDNORM 	= 0x040,
-    EPOLLRDBAND 	= 0x080,
-    EPOLLWRNORM 	= 0x100,
-    EPOLLWRBAND 	= 0x200,
-    EPOLLMSG        = 0x400,
-    EPOLLERR        = 0x008,
-    EPOLLHUP        = 0x010,
-    EPOLLRDHUP      = 0x2000,
-    EPOLLONESHOT 	= 1u << 30,
-    EPOLLET         = 1u << 31,
-
-    EPOLL_CTL_ADD  	= 1, /* Add a file descriptor to the interface. */
-    EPOLL_CTL_DEL 	= 2, /* Remove a file descriptor from the interface. */
-    EPOLL_CTL_MOD  	= 3 /* Change file descriptor epoll_event structure. */
-}
-
-align(1) struct epoll_event
-{
-align(1):
-        uint events;
-        epoll_data_t data;
-};
-
-union epoll_data_t
-{
-        void *ptr;
-        int fd;
-        uint u32;
-        ulong u64;
-        EventHandler handler;
-};
-
-extern(C) int epoll_create(int size) @safe @nogc nothrow;
-extern(C) int epoll_ctl(int epfd, int op, int fd, epoll_event *event) @safe @nogc nothrow;
-extern(C) int epoll_wait(int epfd, epoll_event *events, int maxevents, int timeout) @safe @nogc nothrow;
-extern(C) int timerfd_create(int clockid, int flags) @safe @nogc nothrow;
-extern(C) int timerfd_settime(int fd, int flags, itimerspec* new_value, itimerspec* old_value) @safe @nogc nothrow;
-extern(C) int signalfd(int fd, const sigset_t *mask, int flags) @safe @nogc nothrow;
-extern(C) int sigaddset(const sigset_t *mask, int sig) @safe @nogc nothrow;
-extern(C) int sigprocmask(int, const sigset_t *, sigset_t *) @safe @nogc nothrow;
-
-enum MAXEVENTS = 1024;
-
-interface EventHandler {
-    void handle(epoll_event e);
-}
-
-class EventLoop {
-    int epoll_fd;
-    align(1) epoll_event[MAXEVENTS] events;
-
-    this() nothrow @safe @nogc {
-        epoll_fd = epoll_create(MAXEVENTS);
-        if ( epoll_fd < 0 ) {
-            assert(false, "Failed to create epoll_fd");
+class FailedToCreateDescriptor: Exception {
+    public
+    {
+        @safe pure nothrow this(string message,
+                                string file =__FILE__,
+                                size_t line = __LINE__,
+                                Throwable next = null)
+        {
+            super(message, file, line, next);
         }
     }
-    int add(int fd, epoll_event e) nothrow @trusted @nogc {
-        return epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &e);
+}
+
+version(linux) {
+    private import core.sys.linux.sys.signalfd;
+
+    enum {
+        EPOLLIN         = 0x001,
+        EPOLLPRI        = 0x002,
+        EPOLLOUT        = 0x004,
+        EPOLLRDNORM 	= 0x040,
+        EPOLLRDBAND 	= 0x080,
+        EPOLLWRNORM 	= 0x100,
+        EPOLLWRBAND 	= 0x200,
+        EPOLLMSG        = 0x400,
+        EPOLLERR        = 0x008,
+        EPOLLHUP        = 0x010,
+        EPOLLRDHUP      = 0x2000,
+        EPOLLONESHOT 	= 1u << 30,
+        EPOLLET         = 1u << 31,
+    
+        EPOLL_CTL_ADD  	= 1, /* Add a file descriptor to the interface. */
+        EPOLL_CTL_DEL 	= 2, /* Remove a file descriptor from the interface. */
+        EPOLL_CTL_MOD  	= 3 /* Change file descriptor epoll_event structure. */
     }
-    int del(int fd, epoll_event e) nothrow @trusted @nogc {
-        return epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &e);
+    
+    align(1) struct epoll_event
+    {
+    align(1):
+            uint events;
+            epoll_data_t data;
+    };
+    
+    union epoll_data_t
+    {
+            void *ptr;
+            int fd;
+            uint u32;
+            ulong u64;
+            EventHandler handler;
+    };
+    
+    extern(C) int epoll_create(int size) @safe @nogc nothrow;
+    extern(C) int epoll_ctl(int epfd, int op, int fd, epoll_event *event) @safe @nogc nothrow;
+    extern(C) int epoll_wait(int epfd, epoll_event *events, int maxevents, int timeout) @safe @nogc nothrow;
+    extern(C) int timerfd_create(int clockid, int flags) @safe @nogc nothrow;
+    extern(C) int timerfd_settime(int fd, int flags, itimerspec* new_value, itimerspec* old_value) @safe @nogc nothrow;
+    extern(C) int signalfd(int fd, const sigset_t *mask, int flags) @safe @nogc nothrow;
+    extern(C) int sigaddset(const sigset_t *mask, int sig) @safe @nogc nothrow;
+    extern(C) int sigprocmask(int, const sigset_t *, sigset_t *) @safe @nogc nothrow;
+    
+    enum MAXEVENTS = 1024;
+    
+    interface EventHandler {
+        void handle(PollingEvent e);
     }
-    void loop(Duration d) {
-        if ( d == 0.seconds ) {
-            return;
+    ///
+    /// convert from platform-independent events to platform-dependent
+    ///
+    uint convertToImplEvents(in uint events) @safe @nogc nothrow {
+        return (events & 0x1f) | EPOLLET;
+    }
+    ///
+    /// convert from platform-dependent events to platform-independent
+    ///
+    uint convertFromImplEvents(in uint implEvents)  @safe @nogc nothrow {
+        return implEvents & 0x1f;
+    }
+    class EventLoop {
+        int epoll_fd;
+        align(1) epoll_event[MAXEVENTS] events;
+    
+        this() nothrow @safe @nogc {
+            epoll_fd = epoll_create(MAXEVENTS);
+            if ( epoll_fd < 0 ) {
+                assert(false, "Failed to create epoll_fd");
+            }
         }
-
-        uint timeout_ms = cast(int)d.total!"msecs";
-
-        uint ready = epoll_wait(epoll_fd, cast(epoll_event*)&events[0], MAXEVENTS, timeout_ms);
-        if ( ready > 0 ) {
-            foreach(i; 0..ready) {
-                auto e = events[i];
-                EventHandler handler = e.data.handler;
-                handler.handle(e);
+        int add(int fd, PollingEvent pe) nothrow @trusted @nogc {
+            epoll_event e;
+            e.events = convertToImplEvents(pe.events);
+            e.data.handler = pe.handler;
+            return epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &e);
+        }
+        int del(int fd, PollingEvent pe) nothrow @trusted @nogc {
+            epoll_event e;
+            e.events = convertToImplEvents(pe.events);
+            e.data.handler = pe.handler;
+            return epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &e);
+        }
+        void loop(Duration d) {
+            if ( d == 0.seconds ) {
+                return;
+            }
+    
+            uint timeout_ms = cast(int)d.total!"msecs";
+    
+            uint ready = epoll_wait(epoll_fd, cast(epoll_event*)&events[0], MAXEVENTS, timeout_ms);
+            if ( ready > 0 ) {
+                foreach(i; 0..ready) {
+                    auto e = events[i];
+                    EventHandler handler = e.data.handler;
+                    auto pe = PollingEvent(convertFromImplEvents(e.events));
+                    handler.handle(pe);
+                }
             }
         }
     }
@@ -120,21 +170,22 @@ class SignalHandler(F) : EventHandler {
     ///		sig = signal
     ///		dg = handler
     ///
-    this(EventLoop evl, int sig, F dg, in string file = __FILE__ , in size_t line = __LINE__) @safe @nogc {
+    this(EventLoop evl, int sig, F dg, in string file = __FILE__ , in size_t line = __LINE__) @safe {
         this.dg = dg;
         static sigset_t m;
         this.sig = sig;
         sigaddset(&m, sig);
         sigprocmask(SIG_BLOCK, &m, null);
         this.signal_fd = signalfd(-1, &m, 0);
+        if ( this.signal_fd < 0 ) {
+            throw new FailedToCreateDescriptor("Failed to create signalfd");            
+        }
         this.evl = evl;
-        auto e = epoll_event();
-        e.events = EPOLLET | EPOLLIN;
-        e.data.handler = this;
-        evl.add(this.signal_fd, e);
+        auto pe = PollingEvent(Event.IN, this);
+        evl.add(this.signal_fd, pe);
     }
 
-    override void handle(epoll_event e) {
+    override void handle(PollingEvent e) {
         signalfd_siginfo si;
         ssize_t res = read(this.signal_fd, &si, si.sizeof);
         if ( res != si.sizeof ) {
@@ -147,9 +198,8 @@ class SignalHandler(F) : EventHandler {
         static sigset_t m;
         sigaddset(&m, this.sig);
         sigprocmask(SIG_UNBLOCK, &m, null);
-        auto e = epoll_event();
-        e.events = EPOLLET | EPOLLIN;
-        evl.del(this.signal_fd, e);
+        auto pe = PollingEvent(PollingEvent.IN, this);
+        evl.del(this.signal_fd, pe);
         close(this.signal_fd);
     }
 }
@@ -159,17 +209,14 @@ class AsyncTimer : EventHandler {
     int         timer_fd;
     EventLoop   evl;
     void delegate() dg;
-//    string      caller;
 
-    this(EventLoop evl, in string file = __FILE__ , in size_t line = __LINE__) @safe @nogc {
-//        caller = format("%s:%d", file, line);
+    this(EventLoop evl, in string file = __FILE__ , in size_t line = __LINE__) @safe {
 
         this.timer_fd = timerfd_create(CLOCK_REALTIME, 0);
         this.evl = evl;
 
         if ( timer_fd < 0 ) {
-//            error("Failed to create timer_fd");
-            return;
+            throw new FailedToCreateDescriptor("Failed to create timerfd");
         }
     }
 
@@ -197,22 +244,18 @@ class AsyncTimer : EventHandler {
         itimer.it_value.tv_sec = cast(typeof(itimer.it_value.tv_sec)) d.split!("seconds", "nsecs")().seconds;
         itimer.it_value.tv_nsec = cast(typeof(itimer.it_value.tv_nsec)) d.split!("seconds", "nsecs")().nsecs;
         timerfd_settime(timer_fd, 0, &itimer, null);
-        auto e = epoll_event();
-        e.events = EPOLLET | EPOLLIN;
-        e.data.handler = this;
-        evl.add(timer_fd, e);
+        auto pe = PollingEvent(PollingEvent.IN, this);
+        evl.add(timer_fd, pe);
     }
 
-    override void handle(epoll_event e) {
+    override void handle(PollingEvent e) {
         dg();
     }
 
     void kill() @safe @nogc nothrow {
         if ( timer_fd > 0 ) {
-            auto e = epoll_event();
-            e.events = EPOLLET | EPOLLIN;
-            e.data.handler = this;
-            evl.del(timer_fd, e);
+            auto pe = PollingEvent(PollingEvent.IN, this);
+            evl.del(timer_fd, pe);
             close(timer_fd);
             timer_fd = -1;
         }
@@ -233,17 +276,13 @@ class asyncAccept : EventHandler {
         this._on_accept = d;
 
         so.blocking(false);
-        auto e = epoll_event();
-        e.events = 	EPOLLIN ;
-        e.data.handler = this;
-        evl.add(so.handle, e);
+        auto pe = PollingEvent(PollingEvent.IN, this);
+        evl.add(so.handle, pe);
     }
 
     void close() nothrow @safe @nogc {
-        auto e = epoll_event();
-        e.events =  EPOLLIN ;
-        e.data.handler = this;
-        evl.del(so.handle, e);
+        auto pe = PollingEvent(PollingEvent.IN, this);
+        evl.del(so.handle, pe);
 
         if ( so !is null ) {
             so.close();
@@ -251,7 +290,7 @@ class asyncAccept : EventHandler {
         }
     }
 
-    override void handle(epoll_event e) {
+    override void handle(PollingEvent e) {
         Event app_event = {events:Event.IN};
         trace("accepted");
         this._on_accept(app_event);
@@ -283,10 +322,8 @@ class asyncConnection : EventHandler {
         this.evl = evl;
         so.blocking(false);
         so.connect(to);
-        auto e = epoll_event();
-        e.events = EPOLLOUT;
-        e.data.handler = this;
-        evl.add(so.handle, e);
+        auto pe = PollingEvent(PollingEvent.OUT, this);
+        evl.add(so.handle, pe);
     }
 
     bool connected() pure const nothrow @safe @property @nogc {
@@ -311,15 +348,12 @@ class asyncConnection : EventHandler {
         if ( d is null ) {
             // stop sending
             _on_send = null;
-            epoll_event e;
-            e.events = EPOLLOUT;
-            evl.del(so.handle, e);
+            auto pe = PollingEvent(PollingEvent.OUT);
+            evl.del(so.handle, pe);
         } else {
             _on_send = d;
-            epoll_event e;
-            e.events = EPOLLOUT;
-            e.data.handler = this;
-            evl.add(so.handle, e);
+            auto pe = PollingEvent(PollingEvent.OUT, this);
+            evl.add(so.handle, pe);
         }
     }
 
@@ -334,27 +368,23 @@ class asyncConnection : EventHandler {
             // stop receiving
             trace("stop recv");
             _on_recv = null;
-            epoll_event e;
-            e.events = EPOLLIN|EPOLLHUP;
-            evl.del(so.handle, e);
+            auto pe = PollingEvent(PollingEvent.IN|PollingEvent.HUP);
+            evl.del(so.handle, pe);
         } else {
             trace("start receiving");
             _on_recv = d;
-            epoll_event e;
-            e.events = EPOLLIN|EPOLLHUP;
-            e.data.handler = this;
-            evl.add(so.handle, e);
+            auto pe = PollingEvent(PollingEvent.IN|PollingEvent.HUP, this);
+            evl.add(so.handle, pe);
         }
     }
 
-    override void handle(epoll_event e) {
+    override void handle(PollingEvent e) {
         Event app_event;
         tracef("GOT EVENT %x", e.events);
         if ( _on_conn ) {
             // This is connection request
-            epoll_event ev_to_del;
-            ev_to_del.events = EPOLLOUT|EPOLLERR;
-            evl.del(so.handle, ev_to_del);
+            auto pe = PollingEvent(PollingEvent.OUT|PollingEvent.ERR);
+            evl.del(so.handle, pe);
             if ( e.events & EPOLLERR ) {
                 app_event.events = Event.ERR;
                 _connected = false;
@@ -372,23 +402,23 @@ class asyncConnection : EventHandler {
             return;
         }
         uint err_flags = 0;
-        if ( e.events & EPOLLHUP ) {
+        if ( e.events & PollingEvent.HUP ) {
             _instream_closed = true;
             err_flags += Event.HUP;
         }
-        if ( e.events & EPOLLERR ) {
+        if ( e.events & PollingEvent.ERR ) {
             _error = true;
             err_flags += Event.ERR;
         }
-        if ( e.events & EPOLLOUT ) {
+        if ( e.events & PollingEvent.OUT ) {
             app_event.events = Event.OUT | err_flags;
             _on_send(app_event);
         }
-        if ( e.events & EPOLLIN ) {
+        if ( e.events & PollingEvent.IN ) {
             app_event.events = Event.IN | err_flags;
             _on_recv(app_event);
         }
-        if ( e.events & (EPOLLERR|EPOLLHUP) ) {
+        if ( e.events & (PollingEvent.ERR|PollingEvent.HUP) ) {
             _error = true;
             if ( _on_err ) {
                 app_event.events = Event.ERR;
@@ -396,5 +426,4 @@ class asyncConnection : EventHandler {
             }
         }
     }
-
 }
