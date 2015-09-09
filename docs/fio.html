@@ -51,7 +51,7 @@ Daemon object (you can chain calls)<br><br>
 <dd>Execution unit that run in "foreground" - you can wait for completion and get results
 <br><br>
 
-<dl><dt><big><a name="Future.this"></a>pure @safe this(F <i>f</i>, A <i>a</i>);
+<dl><dt><big><a name="Future.this"></a>pure nothrow @nogc @safe this(F <i>f</i>, A <i>a</i>);
 </big></dt>
 <dd>Constructor
 <br><br>
@@ -113,7 +113,7 @@ result of f, or exceptioin ResultNotReady if result is not ready after timeout <
 </big></dt>
 <dd><u>makeFuture</u> create "Future" - execution unit that you
 <br><br>
-can start and wait for completion and get result
+can start, wait for completion and get result
 
 <br><br>
 <b>Params:</b><br>
@@ -148,9 +148,9 @@ info(<font color=red>"Test Future"</font>);
     <font color=blue>assert</font>(t.waitAll(1.seconds) == [0,0,TIMEOUT,0]);
     info(<font color=red>"Future waitAll - ok"</font>);
     <font color=blue>auto</font> tasks = map!(a =&gt; <u>makeFuture</u>(&amp;f1, a).start)([1, 2, 3]).array();
-    tasks ~= <u>makeFuture</u>(&amp;f1,4).start;
-    fioSleep(1.seconds);
-    <font color=blue>assert</font>(tasks.map!(a =&gt; a.waitAndGet).array() == [1,2,3,4]);
+    tasks ~= <u>makeFuture</u>(&amp;f1, 4).start;
+    <font color=green>//fioSleep(1.seconds);
+</font>    <font color=blue>assert</font>(tasks.map!(a =&gt; a.waitAndGet).array() == [1,2,3,4]);
     info(<font color=red>"Future waitAndGet - ok"</font>);
     <font color=blue>auto</font> d = makeDaemon(
             (<font color=blue>int</font> a) {

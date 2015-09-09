@@ -6,9 +6,11 @@ private import std.conv;
 private import std.stdio;
 private import std.socket;
 private import std.format;
-private import core.sys.posix.time : itimerspec, CLOCK_REALTIME;
+private import core.sys.posix.time : itimerspec, CLOCK_REALTIME, timespec;
 private import core.sys.posix.unistd : close, read;
 private import core.sys.posix.signal;
+
+enum MAXEVENTS = 1024;
 
 ///
 /// event interface to kernel poll implementation (epoll or kqueue)
@@ -18,10 +20,31 @@ struct PollingEvent {
         IN  	= 1,
         OUT 	= 4,
         ERR 	= 0x08,
-        HUP		= 0x10,
+        HUP     = 0x10,
     };
     uint	     events;
     EventHandler handler;
+    string toString() const nothrow @safe {
+        import std.array;
+        string[] bits;
+        if ( events & IN ) {
+            bits ~= "IN";
+        }
+        if ( events & OUT ) {
+            bits ~= "OUT";
+        }
+        if ( events & ERR ) {
+            bits ~= "ERR";
+        }
+        if ( events & HUP ) {
+            bits ~= "HUP";
+        }
+        try {
+            return format("polling events '%s'", join(bits, "+"));
+        } catch (Exception e) {
+            return to!string(events);
+        }
+    }
 }
 
 ///
@@ -29,12 +52,12 @@ struct PollingEvent {
 ///
 struct Event {
     enum {
-        IN  	= 1,
-        OUT 	= 4,
-        CONN 	= 8,
-        ERR 	= 0x10,
-        HUP		= 0x20,
-        TMO 	= 0x40
+        IN      = 1,
+        OUT     = 4,
+        CONN    = 8,
+        ERR     = 0x10,
+        HUP     = 0x20,
+        TMO     = 0x40
     };
     uint	events;
 }
@@ -50,6 +73,148 @@ class FailedToCreateDescriptor: Exception {
             super(message, file, line, next);
         }
     }
+}
+
+class EventHandler {
+    void handle(PollingEvent e) {assert(false, "Must be override this");};
+}
+
+version(FreeBSD) {
+    import core.sys.freebsd.sys.event;
+    import core.sys.posix.fcntl: open, O_RDONLY;
+    import core.sys.posix.unistd: close;
+    extern(C) int kqueue() @safe @nogc nothrow;
+    extern(C) int kevent(int kqueue_fd, kevent_t *events, int ne, kevent_t *events, int ne,timespec* timeout) @safe @nogc nothrow;
+    //extern(C) void EV_SET(kevent_t* kevp, typeof(kevent_t.tupleof) args) @safe @nogc nothrow;
+
+    ///
+    /// convert from platform-independent events to platform-dependent
+    ///
+    auto convertToImplEvents(in uint events) @safe @nogc nothrow {
+        short result;
+        if ( events & PollingEvent.IN )
+            result |= EVFILT_READ;
+        if ( events & PollingEvent.OUT )
+            result |= EVFILT_WRITE;
+        return result;
+    }
+    ///
+    /// convert from platform-dependent events to platform-independent
+    ///
+    uint convertFromImplEvents(in kevent_t e)  @safe {
+        uint result;
+        auto implEvents = e.filter;
+        
+        tracef("implEv: %d", implEvents);
+        if ( implEvents == EVFILT_TIMER ) {
+            result |= PollingEvent.IN;
+        }
+        if ( implEvents == EVFILT_READ ) {
+            result |= PollingEvent.IN;
+        }
+        if ( implEvents == EVFILT_WRITE ) {
+            result |= PollingEvent.OUT;
+        }
+        if ( e.flags & EV_ERROR ) {
+            result |= PollingEvent.ERR;
+        }
+        if ( e.flags & EV_EOF ) {
+            result |= PollingEvent.HUP;
+        }
+        tracef("result: %0x", result);
+        return result;
+    }
+
+    auto timerfd_create(int clockid, int flags) @trusted @nogc nothrow {
+        return open("/dev/zero", O_RDONLY);
+    }
+
+    class EventLoop {
+        private int kqueue_fd;
+        private int in_index;
+        private kevent_t[MAXEVENTS] in_events;
+        private kevent_t[MAXEVENTS] out_events;
+
+        this() nothrow @safe @nogc {
+            kqueue_fd = kqueue();
+            if ( kqueue_fd < 0 ) {
+                assert(false, "Failed to create kqueue_fd");
+            }
+        }
+        int add(int fd, PollingEvent pe) nothrow @trusted @nogc
+            in {
+                assert(in_index <= MAXEVENTS);
+            }
+            body {
+                kevent_t e;
+                e.filter = convertToImplEvents(pe.events);
+                e.flags = EV_ADD;// | EV_ONESHOT;
+                e.udata = cast(void*)pe.handler;
+                add(fd, e);
+                return 0;
+            }
+        int add(int fd, kevent_t e) nothrow @trusted @nogc
+            in {
+                assert(in_index <= MAXEVENTS);
+            }
+            body {
+                e.ident = fd;
+                if ( true || in_index == MAXEVENTS ) {
+                    uint ready = kevent(kqueue_fd, &e, 1, null, 0, null);
+                } else {
+                    in_events[in_index++] = e;
+                }
+                return 0;
+            }
+        int del(int fd, PollingEvent pe) nothrow @trusted @nogc 
+            in {
+                assert(in_index <= MAXEVENTS);
+            }
+            body {
+                kevent_t e;
+                e.ident = fd;
+                e.filter = convertToImplEvents(pe.events);
+                e.flags = EV_DELETE;
+                e.udata = cast(void*)pe.handler;
+                if ( true || in_index == MAXEVENTS ) {
+                    uint ready = kevent(kqueue_fd, &e, 1, null, 0, null);
+                } else {
+                    in_events[in_index++] = e;
+                }
+                return 0;
+            }
+        void loop(Duration d) 
+            in {
+                assert(in_index<=MAXEVENTS);
+            }
+            body {
+                if ( d == 0.seconds ) {
+                    return;
+                }
+        
+                timespec ts = {
+                    tv_sec: cast(typeof(timespec.tv_sec))d.split!("seconds", "nsecs")().seconds,
+                    tv_nsec:cast(typeof(timespec.tv_nsec))d.split!("seconds", "nsecs")().nsecs
+                };
+                uint ready = kevent(kqueue_fd, cast(kevent_t*)&in_events[0], in_index,
+                                           cast(kevent_t*)&out_events[0], MAXEVENTS, &ts);
+                in_index = 0;
+                if ( ready > 0 ) {
+                    foreach(i; 0..ready) {
+                        auto e = out_events[i];
+                        EventHandler handler = cast(EventHandler)e.udata;
+                        tracef("got event[%d] %s, data: %0x", i, e, e.udata);
+                        auto pe = PollingEvent(convertFromImplEvents(e));
+                        tracef("event %x for %s", pe.events, handler.toString());
+                        handler.handle(pe);
+                    }
+                } else if ( ready == 0 ) {
+                    error("timeout");
+                } else {
+                    error("kevent returned error");
+                }
+            }
+        }
 }
 
 version(linux) {
@@ -100,11 +265,7 @@ version(linux) {
     extern(C) int sigaddset(const sigset_t *mask, int sig) @safe @nogc nothrow;
     extern(C) int sigprocmask(int, const sigset_t *, sigset_t *) @safe @nogc nothrow;
     
-    enum MAXEVENTS = 1024;
     
-    interface EventHandler {
-        void handle(PollingEvent e);
-    }
     ///
     /// convert from platform-independent events to platform-dependent
     ///
@@ -170,27 +331,45 @@ class SignalHandler(F) : EventHandler {
     ///		sig = signal
     ///		dg = handler
     ///
-    this(EventLoop evl, int sig, F dg, in string file = __FILE__ , in size_t line = __LINE__) @safe {
+    this(EventLoop evl, int sig, F dg, in string file = __FILE__ , in size_t line = __LINE__) @trusted {
         this.dg = dg;
         static sigset_t m;
         this.sig = sig;
+        this.evl = evl;
+        sigemptyset(&m);
         sigaddset(&m, sig);
         sigprocmask(SIG_BLOCK, &m, null);
-        this.signal_fd = signalfd(-1, &m, 0);
-        if ( this.signal_fd < 0 ) {
-            throw new FailedToCreateDescriptor("Failed to create signalfd");            
+        version(linux) {
+            this.signal_fd = signalfd(-1, &m, 0);
+            if ( this.signal_fd < 0 ) {
+                throw new FailedToCreateDescriptor("Failed to create signalfd");            
+            }
+            auto pe = PollingEvent(Event.IN, this);
+            evl.add(this.signal_fd, pe);
         }
-        this.evl = evl;
-        auto pe = PollingEvent(Event.IN, this);
-        evl.add(this.signal_fd, pe);
+        version(FreeBSD) {
+            signal(sig, SIG_IGN);
+            kevent_t e;
+            e.ident = sig;
+            e.filter = EVFILT_SIGNAL;
+            e.flags = EV_ADD|EV_ENABLE;
+            e.udata = cast(void*)this;
+//            EV_SET(&e, sig, EVFILT_SIGNAL, EV_ADD|EV_ENABLE, 0, 0, cast(void*)this);
+            evl.add(sig, e);
+        }
+    }
+    override string toString() const {
+        return "SignalHandler";
     }
 
     override void handle(PollingEvent e) {
-        signalfd_siginfo si;
-        ssize_t res = read(this.signal_fd, &si, si.sizeof);
-        if ( res != si.sizeof ) {
-            errorf("Something wrong reading from signal_fd: got %d instead of %d", res, si.sizeof);
-            return;
+        version(linux) {
+            signalfd_siginfo si;
+            ssize_t res = read(this.signal_fd, &si, si.sizeof);
+            if ( res != si.sizeof ) {
+                errorf("Something wrong reading from signal_fd: got %d instead of %d", res, si.sizeof);
+                return;
+            }
         }
         dg(this.sig);
     }
@@ -198,6 +377,9 @@ class SignalHandler(F) : EventHandler {
         static sigset_t m;
         sigaddset(&m, this.sig);
         sigprocmask(SIG_UNBLOCK, &m, null);
+        version(FreeBSD) {
+            signal(sig, SIG_DFL);
+        }
         auto pe = PollingEvent(PollingEvent.IN, this);
         evl.del(this.signal_fd, pe);
         close(this.signal_fd);
@@ -205,19 +387,34 @@ class SignalHandler(F) : EventHandler {
 }
 
 class AsyncTimer : EventHandler {
+  private:
     Duration    d;
     int         timer_fd;
     EventLoop   evl;
     void delegate() dg;
+    string      file;
+    size_t      line;
 
+  public:
     this(EventLoop evl, in string file = __FILE__ , in size_t line = __LINE__) @safe {
 
         this.timer_fd = timerfd_create(CLOCK_REALTIME, 0);
         this.evl = evl;
+        this.file = file;
+        this.line = line;
 
         if ( timer_fd < 0 ) {
             throw new FailedToCreateDescriptor("Failed to create timerfd");
         }
+    }
+    override string toString() const pure nothrow @safe {
+        string name;
+        try {
+            name = format("SyncTimer %s:%d", file, line);
+        } catch (Exception e) {
+            name = "SyncTimer";
+        }
+        return name;
     }
 
    ~this() @safe @nogc nothrow {
@@ -232,52 +429,88 @@ class AsyncTimer : EventHandler {
         this.d = d;
     }
 
-    void run(void delegate() dg) @trusted @nogc
+    void run(void delegate() dg) @trusted nothrow @nogc
     in {
         assert(d != d.init, "AsyncTimer can't run without duration");
         assert(timer_fd != -1, "AsyncTimer can't run without timer_fd");
     }
     body {
         this.dg = dg;
-        itimerspec itimer;
+        version(linux) {
+            itimerspec itimer;
 
-        itimer.it_value.tv_sec = cast(typeof(itimer.it_value.tv_sec)) d.split!("seconds", "nsecs")().seconds;
-        itimer.it_value.tv_nsec = cast(typeof(itimer.it_value.tv_nsec)) d.split!("seconds", "nsecs")().nsecs;
-        timerfd_settime(timer_fd, 0, &itimer, null);
-        auto pe = PollingEvent(PollingEvent.IN, this);
-        evl.add(timer_fd, pe);
+            itimer.it_value.tv_sec = cast(typeof(itimer.it_value.tv_sec)) d.split!("seconds", "nsecs")().seconds;
+            itimer.it_value.tv_nsec = cast(typeof(itimer.it_value.tv_nsec)) d.split!("seconds", "nsecs")().nsecs;
+            timerfd_settime(timer_fd, 0, &itimer, null);
+            auto pe = PollingEvent(PollingEvent.IN, this);
+            evl.add(timer_fd, pe);
+        }
+        version(FreeBSD) {
+            kevent_t e;
+            int delay_ms = cast(int)d.split!"msecs"().msecs;
+            e.ident = timer_fd;
+            e.filter = EVFILT_TIMER;
+            e.flags = EV_ADD|EV_ONESHOT;
+            e.data = delay_ms;
+            e.udata = cast(void*)this;
+            //EV_SET(&e, 1u, EVFILT_TIMER, EV_ADD|EV_ONESHOT, 0u, delay_ms, cast(void*)this);
+            evl.add(timer_fd, e);
+        }
     }
 
     override void handle(PollingEvent e) {
+        trace("timer event");
         dg();
     }
 
-    void kill() @safe @nogc nothrow {
+    void kill() @trusted @nogc nothrow {
         if ( timer_fd > 0 ) {
             auto pe = PollingEvent(PollingEvent.IN, this);
-            evl.del(timer_fd, pe);
+            version(linux) {
+                evl.del(timer_fd, pe);
+            }
+            version(FreeBSD) {
+                kevent_t e;
+                e.ident = timer_fd;
+                e.filter = EVFILT_TIMER;
+                e.flags = EV_DELETE;
+                evl.add(timer_fd, e);
+            }
             close(timer_fd);
             timer_fd = -1;
         }
     }
-    override string toString() @safe @nogc const nothrow pure {
-        return "";
-    }
 }
 
 class asyncAccept : EventHandler {
+  private:
     Socket                  so;
     EventLoop               evl;
     void delegate(Event)    _on_accept;
+    string      file;
+    size_t      line;
 
-    this(EventLoop evl, Socket so, void delegate(Event) d) @trusted {
+  public:
+    this(EventLoop evl, Socket so, void delegate(Event) d,
+            in string file = __FILE__ , in size_t line = __LINE__) @trusted {
         this.so = so;
         this.evl = evl;
         this._on_accept = d;
+        this.file = file;
+        this.line = line;
 
         so.blocking(false);
         auto pe = PollingEvent(PollingEvent.IN, this);
         evl.add(so.handle, pe);
+    }
+    override string toString() const pure nothrow @safe {
+        string name;
+        try {
+            name = format("AsyncAccept %s:%d", file, line);
+        } catch (Exception e) {
+            name = "AsyncAccept";
+        }
+        return name;
     }
 
     void close() nothrow @safe @nogc {
@@ -316,14 +549,23 @@ class asyncConnection : EventHandler {
         this._connected = true;
     }
 
-    this(EventLoop evl, Socket so, Address to, void delegate(Event) dg) @safe {
+    this(EventLoop evl, Socket so, Address to, void delegate(Event) dg) nothrow @safe {
         this._on_conn = dg;
         this.so = so;
         this.evl = evl;
-        so.blocking(false);
-        so.connect(to);
+        try {
+            so.blocking(false);
+            so.connect(to);
+        } catch ( Exception e ) {
+            _error = true;
+            _connected = false;
+            return;
+        }
         auto pe = PollingEvent(PollingEvent.OUT, this);
         evl.add(so.handle, pe);
+    }
+    override string toString() const {
+        return "asyncConnection";
     }
 
     bool connected() pure const nothrow @safe @property @nogc {
@@ -341,7 +583,7 @@ class asyncConnection : EventHandler {
     void on_send(void delegate(Event) d) @property @safe @nogc
     in {
         assert(!_error || !d, "send to error-ed connection");
-        assert(_connected, "send to disconnected" );
+        assert(_connected || d is null, "send to disconnected" );
         assert(this._on_send is null || d is null, "send already active");
     }
     body {
@@ -360,7 +602,7 @@ class asyncConnection : EventHandler {
     void on_recv(void delegate(Event) d) @property @safe
     in {
         assert(_instream_closed || !_error || d is null, "recv error-ed connection");
-        assert(_connected, "recv disconnected" );
+        assert(_connected || d is null, "recv disconnected" );
         assert(this._on_recv is null || d is null, "recv already active");
     }
     body {
@@ -380,12 +622,12 @@ class asyncConnection : EventHandler {
 
     override void handle(PollingEvent e) {
         Event app_event;
-        tracef("GOT EVENT %x", e.events);
+        tracef("GOT EVENT %s", e.toString());
         if ( _on_conn ) {
             // This is connection request
             auto pe = PollingEvent(PollingEvent.OUT|PollingEvent.ERR);
             evl.del(so.handle, pe);
-            if ( e.events & EPOLLERR ) {
+            if ( e.events & (PollingEvent.ERR|PollingEvent.HUP) ) {
                 app_event.events = Event.ERR;
                 _connected = false;
                 _error = true;
@@ -404,6 +646,7 @@ class asyncConnection : EventHandler {
         uint err_flags = 0;
         if ( e.events & PollingEvent.HUP ) {
             _instream_closed = true;
+            _connected = false;
             err_flags += Event.HUP;
         }
         if ( e.events & PollingEvent.ERR ) {
@@ -418,7 +661,7 @@ class asyncConnection : EventHandler {
             app_event.events = Event.IN | err_flags;
             _on_recv(app_event);
         }
-        if ( e.events & (PollingEvent.ERR|PollingEvent.HUP) ) {
+        if ( e.events & (PollingEvent.ERR) ) {
             _error = true;
             if ( _on_err ) {
                 app_event.events = Event.ERR;
