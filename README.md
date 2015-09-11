@@ -1,15 +1,15 @@
 # fio
 
-fio is small async framework, built on top of fibers
+fio is small async framework. You can use as abstracted interface to OS event system (like linux epoll or FreeBSD kqueue), or you can use fio 'wrappers' which let you avoid callbacks in your code.
 
 
 Current features:
-* Future's - execution units you can wait and get results from
-* Daemon's - execution units for background tasks
-* TCP client and server code
-* fork for TCP server
+* Future's - execution units you can wait and get results from.
+* Daemon's - execution units for background tasks.
+* TCP client and server code.
+* fork for TCP server (spread connections over several processes).
 
-See examples in _examples_ folder
+See examples in _examples_ folder.
 
     import std.format;
     import std.experimental.logger;
@@ -46,7 +46,10 @@ See examples in _examples_ folder
         info("done");
     }
 
+* main() create socket listener, which call *server* routine for any new incoming connection, and then start small application *client*. Client send string to server.
+* *server(fioTCPConnection c)* called when new connection arrive on the listening socket.
+* clint(string s) is small application, connecting to server and sending string.
 
 Current limitations:
-* works only with linux epoll
+* works only with linux epoll and FreeBSD kqueue
 

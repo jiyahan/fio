@@ -1,42 +1,20 @@
 {
     "name": "fio",
-    "description": "A minimal D application.",
+    "version": "0.5.0",
+    "description": "Async library with coroutines.",
     "copyright": "Copyright © 2015, igor",
     "authors": ["igor"],
     "configurations": [
         {
-            "name": "app",
-            "targetType": "executable",
-            "sourcePaths": ["source", "source/fio"]
-        },
-        {
-            "name": "examples",
-            "targetType": "executable",
-            "subPackages": [
-                {
-                    "name": "forked_server",
-                    "targetType": "executable",
-                    "sourcePaths": ["examples", "source/fio"],
-                    "sourceFiles": ["examples/forked_server.d", "source/fio"],
-                    "excludedSourceFiles": ["source/app.d"]
-                }
-            ]
-        }
-    ],
-    "dependencies": {
-    },
-    "subPackages": [
-        {
-            "name": "forked_server",
-            "targetType": "executable",
-            "sourcePaths": ["examples", "source/fio"],
-            "sourceFiles": ["examples/forked_server.d", "source/fio/fio.d"],
-            "excludedSourceFiles": ["source/app.d"]
+            "name": "fio",
+            "targetType": "library",
+            "sourceFiles": ["source/fio/fio.d", "source/fio/poll.d"],
+            "excludedSourceFiles": ["source/examples/*", "source/fio/ipaddr.d"]
         }
     ],
     "buildTypes": {
         "unittests": {
-            "buildOptions": ["debugMode", "debugInfo"]
-        }
+            "buildOptions": ["debugMode", "debugInfo", "unittests"],
+        },
     }
 }

@@ -90,7 +90,21 @@ enum {
 enum BACKLOG = 1024;
 
 ///
-/// Excecution unit that run in "background" - you can't wait for its completion
+/// Get stack size for new fibers. Default value is 64k.
+///
+int stacksize() @property {
+    return _STACKSIZE;
+}
+///
+/// Set stack size for new fibers
+///
+void stacksize(int s) @property {
+    _STACKSIZE = s;
+}
+
+///
+/// Excecution unit that run in "background". You can't wait for its completion or get result.
+/// To run asyncronous code that will return any result use Future
 ///
 class Daemon(F, A...) {
   private:
@@ -120,19 +134,6 @@ class Daemon(F, A...) {
         });
         return this;
     }
-}
-
-///
-/// Get stack size for new fibers
-///
-int stacksize() @property {
-    return _STACKSIZE;
-}
-///
-/// Set stack size for new fibers
-///
-void stacksize(int s) @property {
-    _STACKSIZE = s;
 }
 
 ///
@@ -986,20 +987,23 @@ unittest {
         void empty() {
             c++;
         }
-        info("Test non-daemon task wait() after some delay");
+        info("Test non-daemon task wait() after some delay.");
+        info("Please, be patient, can take some time.");
         foreach(i; 0..loops) {
             auto z = new fioTask(&empty);
             fioSleep(1.msecs);
             z.wait();
             destroy(z);
         }
-        info("Test non-daemon task wait() right after start");
+        info("Test non-daemon task wait() right after start.");
+        info("Please, be patient, can take some time.");
         foreach(i; 0..loops) {
             auto z = new fioTask(&empty);
             z.wait();
             destroy(z);
         }
-        info("Test daemon task");
+        info("Test daemon task.");
+        info("Please, be patient, can take some time.");
         foreach(i; 0..loops) {
             auto z = new fioDaemonTask(&empty);
             fioSleep(1.msecs);
@@ -1073,7 +1077,8 @@ unittest {
             info("test dumb listener");
             void dumb_server(fioTCPConnection c) {
             }
-            foreach(int j; 0..10000) {
+            int oloops = 10_000;
+            foreach(int j; 0..oloops) {
                 auto dumb_server_listener = makeTCPListener("localhost", cast(ushort)9997, &dumb_server);
                 dumb_server_listener.start();
                 loops = 100;
@@ -1084,7 +1089,7 @@ unittest {
                 }
                 dumb_server_listener.close();
                 if ( j > 0 && (j % 1000 == 0) ) {
-                    info(format("%d iterations out of %d", j, 1000));
+                    info(format("%d iterations out of %d", j, oloops));
                 }
             }
             info("test dumb listener - done");
