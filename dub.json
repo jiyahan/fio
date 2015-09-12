@@ -1,6 +1,5 @@
 {
     "name": "fio",
-    "version": "0.5.4",
     "description": "Async library with coroutines.",
     "copyright": "Copyright © 2015, Igor Khasilev",
     "license": "LGPL-3.0",
