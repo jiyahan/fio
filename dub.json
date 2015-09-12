@@ -1,6 +1,6 @@
 {
     "name": "fio",
-    "version": "0.5.3",
+    "version": "0.5.4",
     "description": "Async library with coroutines.",
     "copyright": "Copyright © 2015, Igor Khasilev",
     "license": "LGPL-3.0",
@@ -9,8 +9,8 @@
         {
             "name": "fio",
             "targetType": "library",
-            "sourceFiles": ["source/fio/fio.d", "source/fio/poll.d"],
-            "excludedSourceFiles": ["source/examples/*", "source/fio/ipaddr.d"]
+            "sourceFiles": ["source/fio.d", "source/poll.d"],
+            "excludedSourceFiles": ["source/examples/*", "source/ipaddr.d"]
         }
     ],
     "buildTypes": {
