@@ -378,7 +378,17 @@ void
 </dd>
 <dt class="decl"><p><code><a name="makeTCPListener"></a>auto <u>makeTCPListener</u>(F)(string <code><i>host</i></code>, ushort <code><i>port</i></code>, F <code><i>f</i></code>);
 </code></p></dt>
-<dd class="decl desc"><div class="sections"><p>Create TCPListener
+<dd class="decl desc"><div class="sections"><p>Create TCPListener instance.
+</p>
+<p><h4 class="sec">Note:</h4>
+1. Listener will accept connections only after call to method start().
+</p><p>
+
+2. After start() you may want to use method serve() to accept and serve requests
+</p><p>
+
+until method stop is called()
+
 </p>
 <h4 class="sec">Parameters:</h4>
   <table class="params"><tr><td class="paramname"><code>string host</code></td>
@@ -391,6 +401,234 @@ void
 <p><h4 class="sec">Return:</h4>
 instance of class fioTCPListener</p>
 </div>
+</dd>
+<dt class="decl"><p><code><a name="fioTCPListener"></a>class <u>fioTCPListener</u>(F);
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Incoming TCP connections handler
+</p>
+<p>Common</p>
+</div>
+<h3 class="memb">Members:</h3>
+  <dl><dt class="decl"><p><code><a name="fioTCPListener.start"></a>auto <u>start</u>();
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Start accepting connections
+</p>
+</div>
+</dd>
+<dt class="decl"><p><code><a name="fioTCPListener.serve"></a>auto <u>serve</u>();
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Implement loop (also start listening if not done yet).
+</p>
+<p><pre class="d_code">
+<span style="color:blue">while</span> ( ! stopped ) { accept-and-handle;}
+
+</pre>
+</p>
+</div>
+</dd>
+<dt class="decl"><p><code><a name="fioTCPListener.stop"></a>auto <u>stop</u>();
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Break serve() loop.
+</p>
+<p><h4 class="sec">Note:</h4>
+Connection is not closed and still can accept (call close() to close socket)</p>
+</div>
+</dd>
+<dt class="decl"><p><code><a name="fioTCPListener.fork"></a>auto <u>fork</u>(int <code><i>n</i></code>);
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Before call to start() you can <u>fork</u> Listener, it wil accept connectons
+</p>
+<p>in several processes. See forked_server in examples.
+</p><p>
+
+</p><p>
+
+
+</p>
+<h4 class="sec">Parameters:</h4>
+  <table class="params"><tr><td class="paramname"><code>int <code><i>n</i></code></code></td>
+<td class="paramdesc"><p>how many processes to <u>fork</u></p></td></tr>
+</table>
+<p><h4 class="sec">Return:</h4>
+int 0 in parent, 1 in child</p>
+</div>
+</dd>
+<dt class="decl"><p><code><a name="fioTCPListener.waitForForkedChilds"></a>auto <u>waitForForkedChilds</u>();
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Parent can call for forked childs
+</p>
+</div>
+</dd>
+<dt class="decl"><p><code><a name="fioTCPListener.close"></a>void <u>close</u>();
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>stop listening and <u>close</u> socket.
+</p>
+</div>
+</dd>
+</dl>
+</dd>
+<dt class="decl"><p><code><a name="fioTCPConnection"></a>class <u>fioTCPConnection</u>;
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Handle connect(for outgoing connections),send,receive.
+</p>
+</div>
+<h3 class="memb">Members:</h3>
+  <dl><dt class="decl"><p><code><a name="fioTCPConnection.this"></a>this(Socket <code><i>so</i></code>);
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Constructor for pre-created sockets (accepted connection for example)
+</p>
+<h4 class="sec">Parameters:</h4>
+  <table class="params"><tr><td class="paramname"><code>Socket <code><i>so</i></code></code></td>
+<td class="paramdesc"><p>socket</p></td></tr>
+</table>
+</div>
+</dd>
+<dt class="decl"><p><code><a name="fioTCPConnection.this.2"></a>this(in string <code><i>host</i></code>, in ushort <code><i>port</i></code>, in Duration <code><i>timeout</i></code> = 0.seconds);
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Constructor
+</p>
+<p>Create socket, connect to remote end. You can find connection status using
+</p><p>
+
+connected() method
+</p><p>
+
+</p><p>
+
+
+</p>
+<h4 class="sec">Parameters:</h4>
+  <table class="params"><tr><td class="paramname"><code>string <code><i>host</i></code></code></td>
+<td class="paramdesc"><p><code><i>host</i></code> (ip or name to connect)</p></td></tr>
+<tr><td class="paramname"><code>ushort <code><i>port</i></code></code></td>
+<td class="paramdesc"><p><code><i>port</i></code> to connect</p></td></tr>
+<tr><td class="paramname"><code>Duration <code><i>timeout</i></code></code></td>
+<td class="paramdesc"><p>how long to wait for connection</p></td></tr>
+</table>
+</div>
+</dd>
+<dt class="decl"><p><code><a name="fioTCPConnection.close"></a>void <u>close</u>();
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Close socket
+</p>
+</div>
+</dd>
+<dt class="decl"><p><code><a name="fioTCPConnection.timedout"></a>const pure nothrow @property bool <u>timedout</u>();
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Last operation timeout status.
+</p>
+<p><h4 class="sec">Return:</h4>
+<b>true</b> or <b>false</b></p>
+</div>
+</dd>
+<dt class="decl"><p><code><a name="fioTCPConnection.connected"></a>const pure nothrow @property bool <u>connected</u>();
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Status of connection.
+</p>
+<p><h4 class="sec">Return:</h4>
+<b>true</b> or <b>false</b></p>
+</div>
+</dd>
+<dt class="decl"><p><code><a name="fioTCPConnection.error"></a>const pure nothrow @property bool <u>error</u>();
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Error state on socket
+</p>
+<p><h4 class="sec">Return:</h4>
+<b>true</b> or <b>false</b></p>
+</div>
+</dd>
+<dt class="decl"><p><code><a name="fioTCPConnection.send"></a>int <u>send</u>(const void[] <code><i>buff</i></code>, in Duration <code><i>timeout</i></code> = 60.seconds);
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Send data from buffer or <code><i>timeout</i></code>.
+</p>
+<h4 class="sec">Parameters:</h4>
+  <table class="params"><tr><td class="paramname"><code>void[] <code><i>buff</i></code></code></td>
+<td class="paramdesc"><p>data to <u>send</u></p></td></tr>
+<tr><td class="paramname"><code>Duration <code><i>timeout</i></code></code></td>
+<td class="paramdesc"><p><code><i>timeout</i></code> for data sending</p></td></tr>
+</table>
+<p><h4 class="sec">Return:</h4>
+number of transmitted bytes or ERROR</p>
+</div>
+</dd>
+<dt class="decl"><p><code><a name="fioTCPConnection.recv"></a>int <u>recv</u>(byte[] <code><i>buff</i></code>, in Duration <code><i>timeout</i></code> = 0.seconds, in Partial <code><i>partial</i></code> = Partial.yes, in string <code><i>__file__</i></code> = __FILE__, in size_t <code><i>__line__</i></code> = __LINE__);
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Receive data from connection.
+</p>
+<p>When any data received from socket level:
+</p><p>
+
+if <code><i>partial</i></code> is <b>true</b>, return immediately
+</p><p>
+
+else continue waiting for data.
+</p><p>
+
+if <code><i>timeout</i></code>:
+</p><p>
+
+return as many data as we can.
+</p><p>
+
+if error on socket:
+</p><p>
+
+return and set error state.
+
+</p>
+<h4 class="sec">Parameters:</h4>
+  <table class="params"><tr><td class="paramname"><code>byte[] <code><i>buff</i></code></code></td>
+<td class="paramdesc"><p>buffer to receive data to.</p></td></tr>
+<tr><td class="paramname"><code>Duration <code><i>timeout</i></code></code></td>
+<td class="paramdesc"><p>how long to wait data.</p></td></tr>
+<tr><td class="paramname"><code>Partial <code><i>partial</i></code></code></td>
+<td class="paramdesc"><p>if we allow to receive less data then buffer can accept.</p></td></tr>
+</table>
+<p><h4 class="sec">Return:</h4>
+number of received bytes or ERROR (timedout or error on socket).
+</p><p>
+
+if socket closed - return 0</p>
+</div>
+</dd>
+</dl>
+</dd>
+<dt class="decl"><p><code><a name="makeSignalHandler"></a>@safe auto <u>makeSignalHandler</u>(F)(int <code><i>sig</i></code>, F <code><i>f</i></code>, in string <code><i>file</i></code> = __FILE__, in size_t <code><i>line</i></code> = __LINE__);
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Create signal handler
+</p>
+<h4 class="sec">Parameters:</h4>
+  <table class="params"><tr><td class="paramname"><code>int sig</code></td>
+<td class="paramdesc"><p>signal number</p></td></tr>
+<tr><td class="paramname"><code>F f</code></td>
+<td class="paramdesc"><p>function or delegate - handler</p></td></tr>
+</table>
+<p><h4 class="sec">Return:</h4>
+SignalHandler object</p>
+<h4 class="sec">Examples:</h4> <p><pre class="d_code">
+<span style="color:green">///
+</span><span style="color:green">/// test Signal
+</span><span style="color:green">///
+</span><span style="color:blue">import</span> core.sys.posix.signal;
+info(<span style="color:red">"Test Signal"</span>);
+<span style="color:blue">bool</span>    signalled;
+makeApp((){
+    <span style="color:blue">auto</span> sig = <u>makeSignalHandler</u>(SIGINT, (<span style="color:blue">int</span> s){
+        infof(<span style="color:red">"got signal %d"</span>, s);
+        signalled = <span style="color:blue">true</span>;
+    });
+    <span style="color:blue">scope</span>(exit) {
+        sig.restore();
+    }
+    fioSleep(1.seconds);
+    kill(getpid(), SIGINT);
+    fioSleep(1.seconds);
+    <span style="color:blue">assert</span>(signalled);
+});
+runEventLoop();
+info(<span style="color:red">"Test Signal done"</span>);
+</pre>
+</p></div>
 </dd>
 </dl>
   </div>

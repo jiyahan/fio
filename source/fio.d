@@ -400,7 +400,11 @@ void fioSleep(in Duration d) {
 }
 ///////////////////////////////////////////////////////////////
 ///
-/// Create TCPListener
+/// Create TCPListener instance.
+/// Note:
+///   1. Listener will accept connections only after call to method start().
+///   2. After start() you may want to use method serve() to accept and serve requests
+///      until method stop is called()
 ///	Params:
 ///		host = interface to listen
 ///		port = port to listen
@@ -412,7 +416,10 @@ void fioSleep(in Duration d) {
 auto makeTCPListener(F)(string host, ushort port, F f) {
     return new fioTCPListener!(F)(host, port, f);
 }
-
+///
+/// Incoming TCP connections handler
+/// Common 
+///
 class fioTCPListener(F) {
   private:
     F       server;
@@ -449,7 +456,9 @@ class fioTCPListener(F) {
         so.listen(BACKLOG);
         trace("Listener started");
     }
-
+    ///
+    /// Start accepting connections
+    ///
     auto start() {
         if ( evl is null ) {
             evl = new EventLoop;
@@ -457,25 +466,48 @@ class fioTCPListener(F) {
         acceptor = new asyncAccept(evl, so, &run);
         return this;
     }
-    auto stop() in {
-        assert(servingFiber !is null);
-    }
-    body {
-        stopped = true;
-        runnables ~= servingFiber;
-        servingFiber = null;
-    }
-
+    ///
+    /// Implement loop (also start listening if not done yet).
+    /// ---
+    /// while ( ! stopped ) { accept-and-handle;}
+    /// ---
+    ///
     auto serve() in {
         assert(servingFiber is null);
-    }
-    body {
-        // just sleep forewer
+    } body {
+        if ( evl is null ) {
+            evl = new EventLoop;
+        }
+        if ( acceptor is null ) {
+            acceptor = new asyncAccept(evl, so, &run);
+        }
+        // just sleep while not stopped
         servingFiber = Fiber.getThis();
         while ( !stopped ) {
             Fiber.yield();
         }
     }
+    ///
+    /// Break serve() loop.
+    /// Note: Connection is not closed and still can accept (call close() to close socket)
+    ///
+    auto stop() {
+        if ( stopped || servingFiber is null ) {
+            return;
+        }    
+        stopped = true;
+        runnables ~= servingFiber;
+        servingFiber = null;
+    }
+    ///
+    /// Before call to start() you can fork Listener, it wil accept connectons
+    /// in several processes. See forked_server in examples.
+    ///
+    /// Params:
+    ///		n = how many processes to fork
+    /// Return:
+    ///		int 0 in parent, 1 in child
+    ///
     auto fork(int n) {
         while(n) {
             auto pid = .fork();
@@ -488,7 +520,9 @@ class fioTCPListener(F) {
         }
         return 1;
     }
-
+    ///
+    /// Parent can call for forked childs
+    ///
     auto waitForForkedChilds() {
         while( _childs ) {
             int s;
@@ -512,7 +546,9 @@ class fioTCPListener(F) {
             }
         });
     }
-
+    ///
+    /// stop listening and close socket.
+    ///
     void  close() {
         if ( acceptor !is null ) {
             acceptor.close();
@@ -523,9 +559,12 @@ class fioTCPListener(F) {
             destroy(so);
             so = null;
         }
+        stop();
     }
 }
-
+///
+/// Handle connect(for outgoing connections),send,receive.
+///
 class fioTCPConnection {
     string          host;
     ushort          port;
@@ -535,11 +574,25 @@ class fioTCPConnection {
     Address[]       _address;
     asyncConnection _async_connection;
 
+    ///
+    /// Constructor for pre-created sockets (accepted connection for example)
+    ///
+    /// Params:
+    ///   so = socket
     this(Socket so) {
         this.so = so;
         this._async_connection = new asyncConnection(evl, so);
     }
-
+    ///
+    ///  Constructor
+    ///  Create socket, connect to remote end. You can find connection status using
+    ///  connected() method
+    ///
+    ///  Params:
+    ///     host = host (ip or name to connect)
+    ///     port = port to connect
+    ///     timeout = how long to wait for connection
+    ///
     this(in string host, in ushort port, in Duration timeout = 0.seconds ) {
         this.host = host;
         this.port = port;
@@ -564,7 +617,9 @@ class fioTCPConnection {
         }
         Fiber.yield();
     }
-
+    ///
+    /// Close socket
+    ///
     void close() {
         if ( so ) {
             //so.close(); // destroy will close
@@ -577,13 +632,28 @@ class fioTCPConnection {
         }
         destroy(_address);
     }
+    ///
+    /// Last operation timeout status.
+    ///
+    /// Return:
+    ///   true or false
+    ///
     bool timedout() const pure nothrow @property {
         return _timedout;
     }
+    ///
+    /// Status of connection.
+    ///
+    /// Return:
+    ///   true or false
     bool connected() const pure nothrow @property {
         return _async_connection && _async_connection.connected();
     }
-
+    ///
+    /// Error state on socket
+    ///
+    /// Return:
+    ///   true or false
     bool error() const pure nothrow @property {
         return !_async_connection || _async_connection.error();
     }
@@ -595,7 +665,15 @@ class fioTCPConnection {
     bool outstream_closed() const pure nothrow @property {
         return !_async_connection || _async_connection.outstream_closed();
     }
-
+    ///
+    /// Send data from buffer or timeout.
+    ///
+    /// Params:
+    ///    buff = data to send
+    ///    timeout = timeout for data sending
+    ///	Return:
+    ///		number of transmitted bytes or ERROR
+    ///
     int send(const void[] buff, in Duration timeout = 60.seconds)
     in {
         assert( buff.length, "You can't send from empty buffer");
@@ -659,18 +737,26 @@ class fioTCPConnection {
         }
         return _sent;
     }
-
-    int recv(byte[] buff, in Duration timeout=0.seconds, Partial partial=Partial.yes, string __file__ = __FILE__, size_t __line__ = __LINE__)
-    /***********************************************
-    * Receive data from socket
-    * when data received from low level:
-    *   if partial is true, return immediately
-    *    else continue waiting for data.
-    *   if timeout:
-    *     return as many data as we can.
-    *   if error on socket:
-    *   	return and set error state.
-    ***********************************************/
+    ///
+    /// Receive data from connection.
+    /// 
+    /// When any data received from socket level:
+    ///  if partial is true, return immediately
+    ///    else continue waiting for data.
+    ///  if timeout:
+    ///    return as many data as we can.
+    ///  if error on socket:
+    ///   return and set error state.
+    /// Params:
+    ///    buff = buffer to receive data to.
+    ///    timeout = how long to wait data.
+    ///	   partial = if we allow to receive less data then buffer can accept.
+    /// Return:
+    ///    number of received bytes or ERROR (timedout or error on socket).
+    ///	   if socket closed - return 0
+    ///
+    int recv(byte[] buff, in Duration timeout=0.seconds, in Partial partial=Partial.yes,
+        in string __file__ = __FILE__, in size_t __line__ = __LINE__)
     in {
         assert(buff.length > 0, format("You can't recv to zero-length buffer %s:%d", __file__, __line__));
     }
@@ -894,10 +980,19 @@ unittest {
         info("Test exception Done");
     }
 }
-
+///
+/// Create signal handler
+///
+/// Params:
+///		sig = signal number
+///		f = function or delegate - handler
+///	Return:
+///		SignalHandler object
+///
 auto makeSignalHandler(F)(int sig, F f,  in string file = __FILE__ , in size_t line = __LINE__) @safe  {
     return new SignalHandler!F(evl, sig, f, file, line);
 }
+///
 unittest {
     ///
     /// test Signal
