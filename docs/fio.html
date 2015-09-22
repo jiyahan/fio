@@ -134,6 +134,77 @@
 </p>
 </div>
 </dd>
+<dt class="decl"><p><code><a name="MsgBox"></a>class <u>MsgBox</u>;
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Syncronization between fibers.
+</p>
+<h4 class="sec">Examples:</h4> <p><pre class="d_code">
+globalLogLevel(LogLevel.info);
+info(<span style="color:red">"Test msgBox"</span>);
+makeApp((){
+    <span style="color:blue">auto</span> box = <span style="color:blue">new</span> <u>MsgBox</u>;
+
+    <span style="color:blue">auto</span> f1 = makeFuture((<span style="color:blue">int</span> arg){
+            Variant msg = arg;
+            info(<span style="color:red">"post 1st msg"</span>);
+            box.post(msg);
+            fioSleep(500.msecs);
+            msg = arg + 1;
+            info(<span style="color:red">"post 2nd msg"</span>);
+            box.post(msg);
+            info(<span style="color:red">"post empty msg"</span>);
+            box.post();
+        }, 1).start();
+    <span style="color:blue">auto</span> f2 = makeFuture((){
+            infof(<span style="color:red">"Wait for 1st msg"</span>);
+            <span style="color:blue">auto</span> i = box.waitAndGet(1.seconds);
+            infof(<span style="color:red">"Got msg int(%s)"</span>, i);
+            <span style="color:blue">assert</span>(i == 1);
+            infof(<span style="color:red">"Wait for 2nd msg"</span>);
+            i = box.waitAndGet(1.seconds);
+            <span style="color:blue">assert</span>(i == 2);
+            infof(<span style="color:red">"Got msg int(%s)"</span>, i);
+            <span style="color:blue">auto</span> e = box.waitAndGet();
+            infof(<span style="color:red">"Got uninitialized value %s"</span>, e);
+            info(<span style="color:red">"Check timeouts on waiting for msg"</span>);
+            assertThrown(box.waitAndGet(1.seconds));
+        }).start();
+    <span style="color:blue">auto</span> t = tuple(f1,f2);
+    t.waitAll(10.seconds);
+});
+runEventLoop();
+info(<span style="color:red">"MsgBox tests ok"</span>);
+</pre>
+</p></div>
+<h3 class="memb">Members:</h3>
+  <dl><dt class="decl"><p><code><a name="MsgBox.post"></a>@trusted void <u>post</u>(in Variant <code><i>msg</i></code> = Variant.init);
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Post message to box.
+</p>
+<p><h4 class="sec">Parameters:</h4>
+<code><i>msg</i></code> = data to <u>post</u>. Can be empty if you just need to wake up some fiber.
+
+</p>
+<p><h4 class="sec">Return:</h4>
+void</p>
+</div>
+</dd>
+<dt class="decl"><p><code><a name="MsgBox.waitAndGet"></a>@trusted Variant <u>waitAndGet</u>(Duration <code><i>timeout</i></code> = 0.seconds);
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Wait and get message from box
+</p>
+<p><h4 class="sec">Parameters:</h4>
+<code><i>timeout</i></code> = how long to wait
+
+</p>
+<h4 class="sec">Returns:</h4> <p>message posted.
+</p><p>
+
+Can throw exception TimeoutException.</p>
+</div>
+</dd>
+</dl>
+</dd>
 <dt class="decl"><p><code><a name="Daemon"></a>class <u>Daemon</u>(F, A...);
 </code></p></dt>
 <dd class="decl desc"><div class="sections"><p>Excecution unit that run in "background". You can't wait for its completion or get result.
@@ -413,6 +484,7 @@ instance of class fioTCPListener</p>
 </code></p></dt>
 <dd class="decl desc"><div class="sections"><p>Start accepting connections
 </p>
+<h4 class="sec">Returns:</h4> <p>this</p>
 </div>
 </dd>
 <dt class="decl"><p><code><a name="fioTCPListener.serve"></a>auto <u>serve</u>();
@@ -537,7 +609,23 @@ connected() method
 <b>true</b> or <b>false</b></p>
 </div>
 </dd>
-<dt class="decl"><p><code><a name="fioTCPConnection.send"></a>int <u>send</u>(const void[] <code><i>buff</i></code>, in Duration <code><i>timeout</i></code> = 60.seconds);
+<dt class="decl"><p><code><a name="fioTCPConnection.send"></a>int <u>send</u>(const void[] <code><i>buff</i></code>, size_t <code><i>len</i></code>, in Duration <code><i>timeout</i></code> = 60.seconds);
+</code></p></dt>
+<dd class="decl desc"><div class="sections"><p>Send data from buffer or <code><i>timeout</i></code>.
+</p>
+<h4 class="sec">Parameters:</h4>
+  <table class="params"><tr><td class="paramname"><code>void[] <code><i>buff</i></code></code></td>
+<td class="paramdesc"><p>buffer with data</p></td></tr>
+<tr><td class="paramname"><code>size_t <code><i>len</i></code></code></td>
+<td class="paramdesc"><p>range to <u>send</u></p></td></tr>
+<tr><td class="paramname"><code>Duration <code><i>timeout</i></code></code></td>
+<td class="paramdesc"><p><code><i>timeout</i></code> for data sending</p></td></tr>
+</table>
+<p><h4 class="sec">Return:</h4>
+number of transmitted bytes or ERROR</p>
+</div>
+</dd>
+<dt class="decl"><p><code><a name="fioTCPConnection.send.2"></a>int <u>send</u>(const void[] <code><i>buff</i></code>, in Duration <code><i>timeout</i></code> = 60.seconds);
 </code></p></dt>
 <dd class="decl desc"><div class="sections"><p>Send data from buffer or <code><i>timeout</i></code>.
 </p>

@@ -9,6 +9,9 @@ private import std.algorithm;
 private import std.array;
 private import std.conv;
 private import std.traits;
+private import std.variant;
+private import std.exception;
+private import std.container.dlist;
 private import core.sys.posix.sys.wait: wait;
 private import std.typecons;
 private import std.algorithm: remove, countUntil, map, each;
@@ -32,11 +35,14 @@ template frm(alias v) {
 static Exception RingEmpty;
 static Exception RingFull;
 static Exception ResultNotReady;
+static Exception TimeoutException;
 
 static this() {
     RingEmpty = new Exception("Ring empty");
     RingFull = new Exception("Ring full");
     ResultNotReady = new Exception("Task not ready");
+    TimeoutException = new Exception("Timeout");
+
     loop = new fioFiber;
     _STACKSIZE = 64*1024; // default stacksize
 }
@@ -100,6 +106,106 @@ int stacksize() @property {
 ///
 void stacksize(int s) @property {
     _STACKSIZE = s;
+}
+///
+/// Syncronization between fibers.
+///
+class MsgBox {
+    private DList!Variant msgList;
+    private DList!Fiber   waitList;
+    ///
+    /// Post message to box.
+    /// Parameters:
+    ///    msg = data to post. Can be empty if you just need to wake up some fiber.
+    /// Return:
+    ///		void
+    void post(in Variant msg = Variant.init) @trusted {
+        msgList.insertBack(msg);
+        if ( !waitList.empty ) {
+            tracef("Wake up first");
+            // wake up first
+            auto r = waitList.front();
+            waitList.removeFront();
+            runnables ~= r;
+        } else {
+            tracef("Nobody wait on this mbox");
+        }
+    }
+    ///
+    /// Wait and get message from box
+    /// Parameters:
+    ///		timeout = how long to wait
+    ///	Returns:
+    ///		message posted.
+    /// Can throw exception TimeoutException.
+    ///
+    Variant waitAndGet(Duration timeout = 0.seconds) @trusted {
+        auto thisFiber = Fiber.getThis();
+        bool _timedout;
+
+        auto t = scoped!AsyncTimer(evl);
+        if ( timeout != 0.seconds ) {
+            t.duration = timeout;
+            t.run({
+                trace("Waiting on mbox timedout");
+                _timedout = true;
+                runnables ~= thisFiber;
+            });
+        }
+
+        while ( msgList.empty ) {
+            waitList ~= thisFiber;
+            trace("Waiting on emty msgbox");
+            Fiber.yield();
+            if ( !msgList.empty || _timedout ) {
+                break;
+            }
+        }
+        if ( _timedout ) {
+            throw TimeoutException;
+        }
+        auto msg = msgList.front();
+        msgList.removeFront();
+        return msg;
+    }
+}
+///
+unittest {
+    globalLogLevel(LogLevel.info);
+    info("Test msgBox");
+    makeApp((){
+        auto box = new MsgBox;
+
+        auto f1 = makeFuture((int arg){
+                Variant msg = arg;
+                info("post 1st msg");
+                box.post(msg);
+                fioSleep(500.msecs);
+                msg = arg + 1;
+                info("post 2nd msg");
+                box.post(msg);
+                info("post empty msg");
+                box.post();
+            }, 1).start();
+        auto f2 = makeFuture((){
+                infof("Wait for 1st msg");
+                auto i = box.waitAndGet(1.seconds);
+                infof("Got msg int(%s)", i);
+                assert(i == 1);
+                infof("Wait for 2nd msg");
+                i = box.waitAndGet(1.seconds);
+                assert(i == 2);
+                infof("Got msg int(%s)", i);
+                auto e = box.waitAndGet();
+                infof("Got uninitialized value %s", e);
+                info("Check timeouts on waiting for msg");
+                assertThrown(box.waitAndGet(1.seconds));
+            }).start();
+        auto t = tuple(f1,f2);
+        t.waitAll(10.seconds);
+    });
+    runEventLoop();
+    info("MsgBox tests ok");
 }
 
 ///
@@ -459,6 +565,8 @@ class fioTCPListener(F) {
     ///
     /// Start accepting connections
     ///
+    /// Returns:
+    ///		this
     auto start() {
         if ( evl is null ) {
             evl = new EventLoop;
@@ -664,6 +772,19 @@ class fioTCPConnection {
 
     bool outstream_closed() const pure nothrow @property {
         return !_async_connection || _async_connection.outstream_closed();
+    }
+    ///
+    /// Send data from buffer or timeout.
+    ///
+    /// Params:
+    ///    buff = buffer with data
+    ///	   len = range to send
+    ///    timeout = timeout for data sending
+    ///	Return:
+    ///		number of transmitted bytes or ERROR
+    ///
+    int send(const void[] buff, size_t len, in Duration timeout = 60.seconds) {
+        return send(buff[0..len], timeout);
     }
     ///
     /// Send data from buffer or timeout.
@@ -1240,7 +1361,7 @@ unittest {
                 stop = Clock.currTime();
                 assert( conn.connected );
                 trace("connected");
-                conn.send("abc");
+                conn.send("abcd", 3);
                 start = Clock.currTime();
                 assert(buff.length>0);
                 recv_rc = conn.recv(buff);
