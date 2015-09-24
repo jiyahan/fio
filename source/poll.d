@@ -398,7 +398,6 @@ class AsyncTimer : EventHandler {
   public:
     this(EventLoop evl, in string file = __FILE__ , in size_t line = __LINE__) @safe {
 
-        this.timer_fd = timerfd_create(CLOCK_REALTIME, 0);
         this.evl = evl;
         this.file = file;
         this.line = line;
@@ -435,6 +434,7 @@ class AsyncTimer : EventHandler {
         assert(timer_fd != -1, "AsyncTimer can't run without timer_fd");
     }
     body {
+        this.timer_fd = timerfd_create(CLOCK_REALTIME, 0);
         this.dg = dg;
         version(linux) {
             itimerspec itimer;
@@ -499,7 +499,6 @@ class asyncAccept : EventHandler {
         this.file = file;
         this.line = line;
 
-        so.blocking(false);
         auto pe = PollingEvent(PollingEvent.IN, this);
         evl.add(so.handle, pe);
     }
@@ -522,7 +521,6 @@ class asyncAccept : EventHandler {
             so = null;
         }
     }
-
     override void handle(PollingEvent e) {
         Event app_event = {events:Event.IN};
         trace("accepted");

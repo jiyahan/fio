@@ -190,14 +190,11 @@ unittest {
         auto f2 = makeFuture((){
                 infof("Wait for 1st msg");
                 auto i = box.waitAndGet(1.seconds);
-                infof("Got msg int(%s)", i);
                 assert(i == 1);
                 infof("Wait for 2nd msg");
                 i = box.waitAndGet(1.seconds);
                 assert(i == 2);
-                infof("Got msg int(%s)", i);
                 auto e = box.waitAndGet();
-                infof("Got uninitialized value %s", e);
                 info("Check timeouts on waiting for msg");
                 assertThrown(box.waitAndGet(1.seconds));
             }).start();
@@ -558,6 +555,7 @@ class fioTCPListener(F) {
         so = new Socket(_address.addressFamily, SocketType.STREAM, ProtocolType.TCP);
         so.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, 1);
         so.setOption(SocketOptionLevel.SOCKET, So_REUSEPORT, 1);
+        so.blocking(false);
         so.bind(_address);
         so.listen(BACKLOG);
         trace("Listener started");
@@ -650,7 +648,7 @@ class fioTCPListener(F) {
                 }
                 server(fio_connection);
             } catch (SocketAcceptException e) {
-                trace("SocketAcceptException");
+                error("SocketAcceptException");
             }
         });
     }
@@ -658,6 +656,7 @@ class fioTCPListener(F) {
     /// stop listening and close socket.
     ///
     void  close() {
+        trace("close listener");
         if ( acceptor !is null ) {
             acceptor.close();
             acceptor = null;
@@ -730,7 +729,7 @@ class fioTCPConnection {
     ///
     void close() {
         if ( so ) {
-            //so.close(); // destroy will close
+            so.close();
             destroy(so);
             so = null;
         }
@@ -885,7 +884,6 @@ class fioTCPConnection {
         int	received = 0;
         _timedout = false;
         thisFiber = Fiber.getThis();
-        auto timer = scoped!AsyncTimer(evl);
 
 
         if ( _async_connection is null ) {
@@ -901,6 +899,7 @@ class fioTCPConnection {
             _async_connection.on_recv = null;
         }
 
+        auto timer = scoped!AsyncTimer(evl);
         if ( timeout != 0.seconds ) {
             timer.duration = timeout;
             timer.run({
